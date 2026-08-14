@@ -4,7 +4,16 @@ George Tolis
 14 August 2026
 
 ## Function
-To return the visible fraction of sky as a function of time. This program is based off the GOES-18 satellite - positioned at 137W around Hawaii.
+Compute the instantaneous visible fraction of sky from GOES-18 - a satellite positioned at 137W around Hawaii.
+
+The script downloads geometric Earth and Moon position vectors from the
+NASA/JPL Horizons API, with GOES-18 as the observing center.  It then treats
+the Earth and Moon avoidance regions as spherical caps and subtracts the
+solid angle of their union from the full sky (4*pi steradians).
+
+The calculation is rotationally invariant: although the Earth direction
+moves in a satellite-fixed celestial coordinate system, the instantaneous
+fraction of sky depends only on cap sizes and Earth-Moon angular separation.
 
 ## Conditions
 - Must stay within 20 degrees from the Earth limb and the Moon.

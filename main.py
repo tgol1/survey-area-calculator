@@ -1,16 +1,6 @@
 ## Main Script for Survey Area Calculator
 #!/usr/bin/env python3
-"""Compute the instantaneous visible fraction of sky from GOES-18.
 
-The script downloads geometric Earth and Moon position vectors from the
-NASA/JPL Horizons API, with GOES-18 as the observing center.  It then treats
-the Earth and Moon avoidance regions as spherical caps and subtracts the
-solid angle of their union from the full sky (4*pi steradians).
-
-The calculation is rotationally invariant: although the Earth direction
-moves in a satellite-fixed celestial coordinate system, the instantaneous
-fraction of sky depends only on cap sizes and Earth-Moon angular separation.
-"""
 
 from __future__ import annotations
 
