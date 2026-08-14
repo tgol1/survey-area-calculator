@@ -1,6 +1,6 @@
 ## Survey Area Calculator
-George Tolis
-14 August 2026
+George Tolis;
+14 August 2026;
 
 ## Function
 To return the visible fraction of sky as a function of time.
