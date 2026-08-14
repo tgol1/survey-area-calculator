@@ -4,7 +4,7 @@ George Tolis
 14 August 2026
 
 ## Function
-To return the visible fraction of sky as a function of time.
+To return the visible fraction of sky as a function of time. This program is based off the GOES-18 satellite - positioned at 137W around Hawaii.
 
 ## Conditions
 - Must stay within 20 degrees from the Earth limb and the Moon.
