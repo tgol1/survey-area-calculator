@@ -15,7 +15,11 @@ The calculation is rotationally invariant: although the Earth direction
 moves in a satellite-fixed celestial coordinate system, the instantaneous
 fraction of sky depends only on cap sizes and Earth-Moon angular separation.
 
-## Conditions
+Conditions for usable sky are as follows:
 - Must stay within 20 degrees from the Earth limb and the Moon.
 - Must be less than 90 degrees from the Sun.
 - Sky must not be obstructed by moon or earth.
+
+## How to Use
+- Input date range as prompted in YYYY-MM-DD format
+
