@@ -4,7 +4,7 @@ George Tolis
 14 August 2026
 
 ## Function
-Compute the instantaneous visible fraction of sky from GOES-18 - a satellite positioned at 137W around Hawaii.
+Script computes the instantaneous visible fraction of sky from GOES-18 - a satellite positioned at 137W around Hawaii.
 
 The script downloads geometric Earth and Moon position vectors from the
 NASA/JPL Horizons API, with GOES-18 as the observing center.  It then treats
