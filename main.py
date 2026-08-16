@@ -1,6 +1,6 @@
-## Main Script for Survey Area Calculator
-#!/usr/bin/env python3
-
+# Main Script for GOES-18 visible-sky fraction calculation using JPL Horizons ephemerides.
+# George Tolis
+# 14 Aug 26
 
 from __future__ import annotations
 
@@ -371,8 +371,14 @@ def parse_arguments() -> argparse.Namespace:
             "Earth and Moon ephemerides."
         )
     )
-    parser.add_argument("--start", default="2026-08-01", help="Start time in UTC")
-    parser.add_argument("--stop", default="2026-09-01", help="Stop time in UTC")
+    parser.add_argument(
+        "--start",
+        help="Start date in YYYY-MM-DD format; prompted for if omitted",
+    )
+    parser.add_argument(
+        "--stop",
+        help="End date in YYYY-MM-DD format; prompted for if omitted",
+    )
     parser.add_argument(
         "--step",
         default="1 h",
@@ -414,8 +420,48 @@ def parse_arguments() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def prompt_for_date(label: str) -> str:
+    """Prompt until the user enters a valid YYYY-MM-DD calendar date."""
+    while True:
+        try:
+            value = input(f"{label} (YYYY-MM-DD): ").strip()
+        except EOFError as exc:
+            raise SystemExit(
+                "No interactive input was available. Use --start and --stop instead."
+            ) from exc
+
+        try:
+            parsed = datetime.strptime(value, "%Y-%m-%d")
+        except ValueError:
+            print("Invalid date. Enter it in YYYY-MM-DD format, for example 2026-08-01.")
+            continue
+
+        # strptime accepts some non-zero-padded inputs, so normalize the result.
+        return parsed.strftime("%Y-%m-%d")
+
+
+def validate_date_range(start: str, stop: str) -> tuple[str, str]:
+    """Validate and normalize dates supplied through command-line options."""
+    try:
+        start_date = datetime.strptime(start, "%Y-%m-%d")
+        stop_date = datetime.strptime(stop, "%Y-%m-%d")
+    except ValueError as exc:
+        raise SystemExit(
+            "Start and end dates must use YYYY-MM-DD format, for example 2026-08-01."
+        ) from exc
+
+    if stop_date <= start_date:
+        raise SystemExit("The end date must be later than the start date.")
+
+    return start_date.strftime("%Y-%m-%d"), stop_date.strftime("%Y-%m-%d")
+
+
 def main() -> None:
     args = parse_arguments()
+    start = args.start or prompt_for_date("Enter start date")
+    stop = args.stop or prompt_for_date("Enter end date")
+    start, stop = validate_date_range(start, stop)
+
     for label, clearance in (
         ("Earth", args.earth_clearance),
         ("Moon", args.moon_clearance),
@@ -425,11 +471,11 @@ def main() -> None:
 
     print("Downloading Earth vectors from JPL Horizons...")
     earth_jd, earth_calendar, earth_vectors, observer_name = fetch_vectors(
-        EARTH_ID, args.observer_spk, args.start, args.stop, args.step
+        EARTH_ID, args.observer_spk, start, stop, args.step
     )
     print("Downloading Moon vectors from JPL Horizons...")
     moon_jd, moon_calendar, moon_vectors, moon_observer_name = fetch_vectors(
-        MOON_ID, args.observer_spk, args.start, args.stop, args.step
+        MOON_ID, args.observer_spk, start, stop, args.step
     )
 
     if observer_name != moon_observer_name:
@@ -467,17 +513,25 @@ def main() -> None:
         args.moon_reference,
     )
 
-    percent = 100.0 * results["visible_fraction"]
+    fraction = results["visible_fraction"]
+    percent = 100.0 * fraction
     print(f"Observer verified by Horizons: {observer_name}")
+    print(f"Date range: {start} through {stop} UTC")
     print(f"Samples: {len(earth_jd)}")
     print(
-        "Visible sky: "
+        "Visible sky fraction (unitless): "
+        f"min={np.min(fraction):.9f}, "
+        f"mean={np.mean(fraction):.9f}, "
+        f"max={np.max(fraction):.9f}"
+    )
+    print(
+        "Visible sky percent: "
         f"min={np.min(percent):.6f}%, "
         f"mean={np.mean(percent):.6f}%, "
         f"max={np.max(percent):.6f}%"
     )
-    print(f"Wrote {csv_path}")
-    print(f"Wrote {plot_path}")
+    print(f"Wrote CSV: {csv_path.resolve()}")
+    print(f"Wrote plot: {plot_path.resolve()}")
 
 
 if __name__ == "__main__":
