@@ -321,15 +321,29 @@ def write_plot(
     earth_clearance_deg: float,
     moon_clearance_deg: float,
     moon_reference: str,
+    sample_step: str,  # NEW (v1.1 change)
 ) -> None:
     """Create the requested visible-fraction-versus-time plot."""
     path.parent.mkdir(parents=True, exist_ok=True)
     times = [horizons_calendar_to_utc(value) for value in calendar_dates]
     percent = 100.0 * visible_fraction
+    # v1.1 change: use a larger figure size to reduce tick overlap on long date ranges.
+    span_days = max(
+    1.0,
+    (times[-1] - times[0]).total_seconds() / 86400.0,
+    )   
 
-    fig, ax = plt.subplots(figsize=(10.5, 5.8), constrained_layout=True)
-    ax.plot(times, percent, color="#176B87", linewidth=2.0)
-    ax.fill_between(times, percent, np.min(percent) - 1.0, color="#64CCC5", alpha=0.16)
+    figure_width = min(
+        24.0,
+        max(10.5, 6.0 + 0.5 * span_days),
+    )
+
+    fig, ax = plt.subplots(
+        figsize=(figure_width, 6.2),
+        constrained_layout=True,
+    )
+    ax.plot(times, percent, color="#176B87", linewidth=1.5)
+    ##ax.fill_between(times, percent, np.min(percent) - 1.0, color="#64CCC5", alpha=0.16)
 
     spread = float(np.max(percent) - np.min(percent))
     padding = max(0.15, 0.12 * spread)
@@ -338,9 +352,29 @@ def write_plot(
     ax.set_xlabel("Time (UTC)")
     ax.grid(True, color="#D7DEE5", linewidth=0.8, alpha=0.8)
     ax.spines[["top", "right"]].set_visible(False)
-    locator = mdates.AutoDateLocator(minticks=4, maxticks=9)
-    ax.xaxis.set_major_locator(locator)
-    ax.xaxis.set_major_formatter(mdates.ConciseDateFormatter(locator))
+    # V1.1 change: use DayLocator with interval=1 instead of AutoDateLocator to avoid tick overlap on long date ranges.
+    # Add minor gridlines for every six hours
+    
+    # Automatically choose readable date spacing
+    date_locator = mdates.AutoDateLocator(
+        minticks=5,
+        maxticks=10,
+    )
+
+    ax.xaxis.set_major_locator(date_locator)
+    ax.xaxis.set_major_formatter(
+        mdates.ConciseDateFormatter(date_locator)
+    )
+
+    ax.tick_params(
+        axis="x",
+        labelrotation=30,
+    )
+
+    for label in ax.get_xticklabels():
+        label.set_horizontalalignment("right")
+
+    # end x axis locators 
 
     moon_wording = "Moon limb" if moon_reference == "limb" else "Moon center"
     ax.set_title(
@@ -379,10 +413,11 @@ def parse_arguments() -> argparse.Namespace:
         "--stop",
         help="End date in YYYY-MM-DD format; prompted for if omitted",
     )
+    ## v1.1 change - default step is now five minutes instead of one hour
     parser.add_argument(
-        "--step",
-        default="1 h",
-        help="Horizons time step, for example '1 h', '30 min', or '1 d'",
+    "--step",
+    default="5 min",
+    help="Horizons time step (default: '5 min')",
     )
     parser.add_argument(
         "--observer-spk",
@@ -504,13 +539,14 @@ def main() -> None:
     plot_path = args.output_prefix.with_suffix(".png")
     write_results_csv(csv_path, earth_jd, earth_calendar, results)
     write_plot(
-        plot_path,
-        earth_calendar,
-        results["visible_fraction"],
-        observer_name,
-        args.earth_clearance,
-        args.moon_clearance,
-        args.moon_reference,
+    plot_path,
+    earth_calendar,
+    results["visible_fraction"],
+    observer_name,
+    args.earth_clearance,
+    args.moon_clearance,
+    args.moon_reference,
+    args.step,  # NEW (v1.1 change)
     )
 
     fraction = results["visible_fraction"]
