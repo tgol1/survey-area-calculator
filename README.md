@@ -4,6 +4,8 @@ George Tolis
 Last updated: 26 August 2026
 
 ## Changelog
+Every new version number represents completion of additional assignments for project.
+
 v1 - 14 August 2026
 - Initial Release
 
