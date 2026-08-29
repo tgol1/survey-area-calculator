@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# v1.21
 """Compute the instantaneous visible fraction of sky from GOES-18.
 
 The script downloads geometric Earth, Moon, and Sun position vectors from the
@@ -48,6 +47,16 @@ EARTH_MEAN_RADIUS_KM = 6371.0084
 MOON_MEAN_RADIUS_KM = 1737.4
 SUN_MEAN_RADIUS_KM = 695700.0
 FULL_SKY_SR = 4.0 * math.pi
+
+# Pairwise angular-separation limits that reproduce the former 79% sampling
+# trigger when combined with the existing rolling 10-point window.  The
+# 45-degree values are calibrated from the current blue regions.  The
+# 30-degree Sun values preserve the same pair-overlap depth for the smaller
+# Sun exclusion cap.  Order: Earth-Moon, Earth-Sun, Moon-Sun.
+ANGULAR_FINE_LIMITS_DEG = {
+    30.0: (12.4, 27.4, 13.7),
+    45.0: (12.4, 44.5, 29.3),
+}
 
 # Nodes for deterministic integration of a partially overlapping spherical lens.
 _GL_NODES, _GL_WEIGHTS = np.polynomial.legendre.leggauss(128)
@@ -671,7 +680,7 @@ def write_plot(
                 facecolor=coarse_color,
                 label=f"{coarse_step_label} baseline sampling",
             ),
-            Patch(facecolor=fine_color, label="5-minute peak sampling"),
+            Patch(facecolor=fine_color, label="5-minute angular region"),
         ],
         title="X-axis sampling",
         loc="upper right",
@@ -723,7 +732,7 @@ def parse_arguments() -> argparse.Namespace:
         "--step",
         default="1 h",
         help=(
-            "Coarse output step outside qualifying 10-point peak windows "
+            "Coarse output step outside qualifying angular-separation windows "
             "(default: '1 h')"
         ),
     )
@@ -863,18 +872,30 @@ def step_to_minutes(step: str) -> int:
 
 def adaptive_sample_indices(
     calendar_dates: list[str],
-    visible_fraction: np.ndarray,
+    earth_moon_separation_rad: np.ndarray,
+    earth_sun_separation_rad: np.ndarray,
+    moon_sun_separation_rad: np.ndarray,
     coarse_step_minutes: int,
-    peak_threshold_percent: float = 79.0,
+    angular_limits_deg: tuple[float, float, float],
     peak_window_points: int = 10,
 ) -> np.ndarray:
-    """Select fine samples only in 10-point windows containing a peak."""
-    if len(calendar_dates) != len(visible_fraction):
-        raise ValueError("Calendar dates and visibility values must have equal length.")
+    """Select fine samples near qualifying pairwise angular alignments."""
+    sample_count = len(calendar_dates)
+    separation_arrays = (
+        np.asarray(earth_moon_separation_rad, dtype=float),
+        np.asarray(earth_sun_separation_rad, dtype=float),
+        np.asarray(moon_sun_separation_rad, dtype=float),
+    )
+    if any(len(values) != sample_count for values in separation_arrays):
+        raise ValueError("Calendar dates and separation arrays must have equal length.")
     if not calendar_dates:
         return np.asarray([], dtype=int)
     if peak_window_points < 1:
         raise ValueError("Peak window must contain at least one data point.")
+    if len(angular_limits_deg) != 3 or any(
+        limit <= 0.0 for limit in angular_limits_deg
+    ):
+        raise ValueError("Three positive angular-separation limits are required.")
 
     times = [horizons_calendar_to_utc(value) for value in calendar_dates]
     elapsed_minutes = np.asarray(
@@ -884,20 +905,28 @@ def adaptive_sample_indices(
         ],
         dtype=int,
     )
-    percent = 100.0 * np.asarray(visible_fraction, dtype=float)
-
     coarse_mask = elapsed_minutes % coarse_step_minutes == 0
-    at_or_above_peak = percent >= peak_threshold_percent
+    separations_deg = np.column_stack(
+        tuple(np.degrees(values) for values in separation_arrays)
+    )
+    limits_deg = np.asarray(angular_limits_deg, dtype=float)
 
-    # A point is eligible for 5-minute sampling only when it belongs to at
-    # least one rolling 10-point window containing a value at or above 79%.
-    # Therefore, a 10-point window with no qualifying peak contributes no fine
-    # samples. Each true peak also keeps the neighboring samples needed to draw
-    # its complete shape without isolated blue dashes in baseline regions.
-    fine_mask = np.zeros_like(at_or_above_peak)
-    for peak_index in np.flatnonzero(at_or_above_peak):
-        window_start = max(0, int(peak_index) - peak_window_points + 1)
-        window_stop = min(len(fine_mask), int(peak_index) + peak_window_points)
+    # A sample qualifies when any pair is within its calibrated angular limit.
+    # Using OR is intentional: an individual peak can be produced by an
+    # Earth-Moon, Earth-Sun, or Moon-Sun alignment without the other two pairs
+    # also being close together.
+    within_angular_limits = np.any(separations_deg <= limits_deg, axis=1)
+
+    # Retain the previous rolling-window behavior. A point receives 5-minute
+    # sampling only when a qualifying angular alignment occurs within its
+    # 10-point neighborhood; otherwise it remains part of the coarse region.
+    fine_mask = np.zeros(sample_count, dtype=bool)
+    for alignment_index in np.flatnonzero(within_angular_limits):
+        window_start = max(0, int(alignment_index) - peak_window_points + 1)
+        window_stop = min(
+            sample_count,
+            int(alignment_index) + peak_window_points,
+        )
         fine_mask[window_start:window_stop] = True
 
     keep_mask = coarse_mask | fine_mask
@@ -976,15 +1005,22 @@ def main() -> None:
         sun_exclusion,
     )
 
+    angular_limits_deg = ANGULAR_FINE_LIMITS_DEG[sun_exclusion]
     selected_indices = adaptive_sample_indices(
         earth_calendar,
-        results["visible_fraction"],
+        results["earth_moon_separation_rad"],
+        results["earth_sun_separation_rad"],
+        results["moon_sun_separation_rad"],
         coarse_step_minutes,
+        angular_limits_deg,
     )
     selected_jd = earth_jd[selected_indices]
     selected_calendar = [earth_calendar[index] for index in selected_indices]
     selected_results = subset_results(results, selected_indices)
-    sampling_description = f"5 min within 10 points of 79%+; {args.step} elsewhere"
+    em_limit, es_limit, ms_limit = angular_limits_deg
+    sampling_description = (
+        f"5 min near angular alignments; {args.step} elsewhere"
+    )
 
     csv_path = args.output_prefix.with_suffix(".csv")
     plot_path = args.output_prefix.with_suffix(".png")
@@ -1012,9 +1048,15 @@ def main() -> None:
     print(f"Observer verified by Horizons: {observer_name}")
     print(f"Date range: {start} through {stop} UTC")
     print(f"Sun exclusion angle: {sun_exclusion:g} degrees from Sun center")
+    print(
+        "Five-minute angular limits: "
+        f"Earth-Moon <= {em_limit:g} deg, "
+        f"Earth-Sun <= {es_limit:g} deg, "
+        f"Moon-Sun <= {ms_limit:g} deg"
+    )
     print(f"Horizons calculation samples ({query_step}): {len(earth_jd)}")
     print(
-        "CSV/plot samples (5 min in 10-point windows containing >=79%; "
+        "CSV/plot samples (5 min within 10 points of an angular alignment; "
         f"{args.step} elsewhere): {len(selected_indices)}"
     )
     print(

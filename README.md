@@ -22,6 +22,7 @@ v1.2 - 27 August 2026
 
 v1.21 - 29 August 2026
 - Amended graph formatting
+- Graph uses exclusion zones to highlight specific areas and expand with 5 minute intervals
 
 ## Function
 Script computes the instantaneous visible fraction of sky from GOES-18 - a satellite positioned at 137W around Hawaii.
