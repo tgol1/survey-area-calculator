@@ -1,7 +1,7 @@
-## Survey Area Calculator 
+## Survey Area Calculator v1.21
 George Tolis
 
-Last updated: 26 August 2026
+Last updated: 29 August 2026
 
 ## Changelog
 Every new version number represents completion of additional assignments for project.
@@ -19,6 +19,9 @@ v1.1 - 26 August 2026
 v1.2 - 27 August 2026
 - Introduced Sun in calculation. User has option to select 30 or 45 degree exclusion zones with Sun in relation to Earth
 - Function description in README changed to reflect additional features
+
+v1.21 - 29 August 2026
+- Amended graph formatting
 
 ## Function
 Script computes the instantaneous visible fraction of sky from GOES-18 - a satellite positioned at 137W around Hawaii.

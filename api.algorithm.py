@@ -1,6 +1,16 @@
-# Main Script for GOES-18 visible-sky fraction calculation using JPL Horizons ephemerides.
-# George Tolis
-# 14 Aug 26
+#!/usr/bin/env python3
+# v1.21
+"""Compute the instantaneous visible fraction of sky from GOES-18.
+
+The script downloads geometric Earth, Moon, and Sun position vectors from the
+NASA/JPL Horizons API, with GOES-18 as the observing center.  It then treats
+the three avoidance regions as spherical caps and subtracts the solid angle
+of their union from the full sky (4*pi steradians).
+
+The calculation is rotationally invariant: although the body directions move
+in a satellite-fixed celestial coordinate system, the instantaneous fraction
+of sky depends only on the cap sizes and their relative angular geometry.
+"""
 
 from __future__ import annotations
 
@@ -26,6 +36,7 @@ os.environ.setdefault(
 )
 import matplotlib.dates as mdates  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
+from matplotlib.patches import Patch  # noqa: E402
 
 
 HORIZONS_API = "https://ssd.jpl.nasa.gov/api/horizons.api"
@@ -578,8 +589,9 @@ def write_plot(
     moon_reference: str,
     sun_exclusion_deg: float,
     sample_step: str,
+    coarse_step_label: str,
 ) -> None:
-    """Create a line plot with automatically spaced, readable UTC labels."""
+    """Create a filled line plot with a color-coded x-axis sampling strip."""
     path.parent.mkdir(parents=True, exist_ok=True)
     times = [horizons_calendar_to_utc(value) for value in calendar_dates]
     percent = 100.0 * visible_fraction
@@ -591,6 +603,49 @@ def write_plot(
         constrained_layout=True,
     )
     ax.plot(times, percent, color="#176B87", linewidth=1.5)
+    ax.fill_between(
+        times,
+        percent,
+        np.min(percent) - 1.0,
+        color="#64CCC5",
+        alpha=0.16,
+    )
+
+    # Show the actual resolution of every interval as a thin strip along the
+    # bottom x-axis: blue for 5-minute peak data and orange for coarse data.
+    fine_color = "#64748B"
+    coarse_color = "#F59E0B"
+    if len(times) > 1:
+        interval_is_fine = [
+            math.isclose(
+                (stop - start).total_seconds() / 60.0,
+                5.0,
+                abs_tol=0.1,
+            )
+            for start, stop in zip(times[:-1], times[1:])
+        ]
+        span_start = 0
+        for interval_index in range(1, len(interval_is_fine)):
+            if interval_is_fine[interval_index] != interval_is_fine[span_start]:
+                ax.axvspan(
+                    times[span_start],
+                    times[interval_index],
+                    ymin=0.0,
+                    ymax=0.025,
+                    color=(fine_color if interval_is_fine[span_start] else coarse_color),
+                    alpha=0.95,
+                    zorder=4,
+                )
+                span_start = interval_index
+        ax.axvspan(
+            times[span_start],
+            times[-1],
+            ymin=0.0,
+            ymax=0.025,
+            color=(fine_color if interval_is_fine[span_start] else coarse_color),
+            alpha=0.95,
+            zorder=4,
+        )
 
     spread = float(np.max(percent) - np.min(percent))
     padding = max(0.15, 0.12 * spread)
@@ -610,6 +665,21 @@ def write_plot(
     for label in ax.get_xticklabels(which="major"):
         label.set_horizontalalignment("right")
 
+    ax.legend(
+        handles=[
+            Patch(
+                facecolor=coarse_color,
+                label=f"{coarse_step_label} baseline sampling",
+            ),
+            Patch(facecolor=fine_color, label="5-minute peak sampling"),
+        ],
+        title="X-axis sampling",
+        loc="upper right",
+        frameon=True,
+        fontsize=8.5,
+        title_fontsize=8.5,
+    )
+
     moon_wording = "Moon limb" if moon_reference == "limb" else "Moon center"
     ax.set_title(
         "Instantaneous visible fraction of sky from GOES-18",
@@ -624,7 +694,7 @@ def write_plot(
         f"Earth limb + {earth_clearance_deg:g} deg; "
         f"{moon_wording} + {moon_clearance_deg:g} deg; "
         f"Sun center + {sun_exclusion_deg:g} deg | "
-        f"{sample_step} samples | {observer_name}",
+        f"{sample_step} | {observer_name}",
         transform=ax.transAxes,
         fontsize=9.5,
         color="#4B5563",
@@ -651,8 +721,11 @@ def parse_arguments() -> argparse.Namespace:
     )
     parser.add_argument(
         "--step",
-        default="5 min",
-        help="Horizons time step (default: '5 min')",
+        default="1 h",
+        help=(
+            "Coarse output step outside qualifying 10-point peak windows "
+            "(default: '1 h')"
+        ),
     )
     parser.add_argument(
         "--observer-spk",
@@ -755,12 +828,99 @@ def validate_date_range(start: str, stop: str) -> tuple[str, str]:
     return start_date.strftime("%Y-%m-%d"), stop_date.strftime("%Y-%m-%d")
 
 
+def step_to_minutes(step: str) -> int:
+    """Convert a simple minute/hour/day step string to whole minutes."""
+    match = re.fullmatch(
+        r"\s*(\d+(?:\.\d+)?)\s*"
+        r"(m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days)\s*",
+        step.lower(),
+    )
+    if not match:
+        raise SystemExit(
+            "The coarse step must look like '60 min', '1 h', or '1 d'."
+        )
+
+    amount = float(match.group(1))
+    unit = match.group(2)
+    if unit.startswith("h"):
+        minutes = 60.0 * amount
+    elif unit.startswith("d"):
+        minutes = 1440.0 * amount
+    else:
+        minutes = amount
+
+    rounded_minutes = int(round(minutes))
+    if (
+        rounded_minutes < 5
+        or rounded_minutes % 5 != 0
+        or not math.isclose(minutes, rounded_minutes, abs_tol=1e-9)
+    ):
+        raise SystemExit(
+            "The coarse step must be a whole-number multiple of 5 minutes."
+        )
+    return rounded_minutes
+
+
+def adaptive_sample_indices(
+    calendar_dates: list[str],
+    visible_fraction: np.ndarray,
+    coarse_step_minutes: int,
+    peak_threshold_percent: float = 79.0,
+    peak_window_points: int = 10,
+) -> np.ndarray:
+    """Select fine samples only in 10-point windows containing a peak."""
+    if len(calendar_dates) != len(visible_fraction):
+        raise ValueError("Calendar dates and visibility values must have equal length.")
+    if not calendar_dates:
+        return np.asarray([], dtype=int)
+    if peak_window_points < 1:
+        raise ValueError("Peak window must contain at least one data point.")
+
+    times = [horizons_calendar_to_utc(value) for value in calendar_dates]
+    elapsed_minutes = np.asarray(
+        [
+            int(round((timestamp - times[0]).total_seconds() / 60.0))
+            for timestamp in times
+        ],
+        dtype=int,
+    )
+    percent = 100.0 * np.asarray(visible_fraction, dtype=float)
+
+    coarse_mask = elapsed_minutes % coarse_step_minutes == 0
+    at_or_above_peak = percent >= peak_threshold_percent
+
+    # A point is eligible for 5-minute sampling only when it belongs to at
+    # least one rolling 10-point window containing a value at or above 79%.
+    # Therefore, a 10-point window with no qualifying peak contributes no fine
+    # samples. Each true peak also keeps the neighboring samples needed to draw
+    # its complete shape without isolated blue dashes in baseline regions.
+    fine_mask = np.zeros_like(at_or_above_peak)
+    for peak_index in np.flatnonzero(at_or_above_peak):
+        window_start = max(0, int(peak_index) - peak_window_points + 1)
+        window_stop = min(len(fine_mask), int(peak_index) + peak_window_points)
+        fine_mask[window_start:window_stop] = True
+
+    keep_mask = coarse_mask | fine_mask
+    keep_mask[0] = True
+    keep_mask[-1] = True
+    return np.flatnonzero(keep_mask)
+
+
+def subset_results(
+    results: dict[str, np.ndarray], indices: np.ndarray
+) -> dict[str, np.ndarray]:
+    """Return every result column at the selected sample indices."""
+    return {name: values[indices] for name, values in results.items()}
+
+
 def main() -> None:
     args = parse_arguments()
     start = args.start or prompt_for_date("Enter start date")
     stop = args.stop or prompt_for_date("Enter end date")
     start, stop = validate_date_range(start, stop)
     sun_exclusion = args.sun_exclusion or prompt_for_sun_exclusion()
+    coarse_step_minutes = step_to_minutes(args.step)
+    query_step = "5 min"
 
     for label, clearance in (
         ("Earth", args.earth_clearance),
@@ -771,15 +931,15 @@ def main() -> None:
 
     print("Downloading Earth vectors from JPL Horizons...")
     earth_jd, earth_calendar, earth_vectors, observer_name = fetch_vectors(
-        EARTH_ID, args.observer_spk, start, stop, args.step
+        EARTH_ID, args.observer_spk, start, stop, query_step
     )
     print("Downloading Moon vectors from JPL Horizons...")
     moon_jd, moon_calendar, moon_vectors, moon_observer_name = fetch_vectors(
-        MOON_ID, args.observer_spk, start, stop, args.step
+        MOON_ID, args.observer_spk, start, stop, query_step
     )
     print("Downloading Sun vectors from JPL Horizons...")
     sun_jd, sun_calendar, sun_vectors, sun_observer_name = fetch_vectors(
-        SUN_ID, args.observer_spk, start, stop, args.step
+        SUN_ID, args.observer_spk, start, stop, query_step
     )
 
     for body_name, body_jd, body_calendar, body_observer in (
@@ -816,18 +976,34 @@ def main() -> None:
         sun_exclusion,
     )
 
-    csv_path = args.output_prefix.with_suffix(".csv")
-    plot_path = args.output_prefix.with_suffix(".png")
-    write_results_csv(csv_path, earth_jd, earth_calendar, results)
-    write_plot(
-        plot_path,
+    selected_indices = adaptive_sample_indices(
         earth_calendar,
         results["visible_fraction"],
+        coarse_step_minutes,
+    )
+    selected_jd = earth_jd[selected_indices]
+    selected_calendar = [earth_calendar[index] for index in selected_indices]
+    selected_results = subset_results(results, selected_indices)
+    sampling_description = f"5 min within 10 points of 79%+; {args.step} elsewhere"
+
+    csv_path = args.output_prefix.with_suffix(".csv")
+    plot_path = args.output_prefix.with_suffix(".png")
+    write_results_csv(
+        csv_path,
+        selected_jd,
+        selected_calendar,
+        selected_results,
+    )
+    write_plot(
+        plot_path,
+        selected_calendar,
+        selected_results["visible_fraction"],
         observer_name,
         args.earth_clearance,
         args.moon_clearance,
         args.moon_reference,
         sun_exclusion,
+        sampling_description,
         args.step,
     )
 
@@ -836,7 +1012,11 @@ def main() -> None:
     print(f"Observer verified by Horizons: {observer_name}")
     print(f"Date range: {start} through {stop} UTC")
     print(f"Sun exclusion angle: {sun_exclusion:g} degrees from Sun center")
-    print(f"Samples: {len(earth_jd)}")
+    print(f"Horizons calculation samples ({query_step}): {len(earth_jd)}")
+    print(
+        "CSV/plot samples (5 min in 10-point windows containing >=79%; "
+        f"{args.step} elsewhere): {len(selected_indices)}"
+    )
     print(
         "Visible sky fraction (unitless): "
         f"min={np.min(fraction):.9f}, "
