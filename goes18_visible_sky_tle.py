@@ -48,6 +48,7 @@ CELESTRAK_TLE_URL = (
 )
 FINE_STEP_MINUTES = 5
 DEFAULT_MAX_TLE_AGE_DAYS = 14.0
+DEFAULT_FALLBACK_TLE_FILE = Path(__file__).with_name("goes18_2026-08-27.tle")
 
 
 def parse_tle_text(text: str, source: str) -> tuple[str, str, str]:
@@ -90,24 +91,50 @@ def fetch_current_tle(url: str) -> tuple[str, str, str]:
             text = response.read().decode("ascii")
     except (HTTPError, URLError, TimeoutError, UnicodeDecodeError) as exc:
         raise RuntimeError(
-            "Could not download the GOES-18 TLE. Check the internet "
-            "connection or supply --tle-file with a saved TLE."
+            "Could not download the GOES-18 TLE from CelesTrak: "
+            f"{exc}"
         ) from exc
     return parse_tle_text(text, url)
 
 
-def load_tle(path: Path | None, url: str) -> tuple[str, str, str, str]:
-    """Load a local TLE when provided; otherwise fetch the current TLE."""
+def read_tle_file(path: Path) -> tuple[str, str, str]:
+    """Read and validate a local GOES-18 TLE file."""
+    try:
+        text = path.read_text(encoding="ascii")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise RuntimeError(f"Could not read TLE file {path}: {exc}") from exc
+    return parse_tle_text(text, str(path))
+
+
+def load_tle(
+    path: Path | None,
+    url: str,
+    fallback_path: Path,
+) -> tuple[str, str, str, str]:
+    """Load an explicit TLE, or try CelesTrak then the bundled fallback."""
     if path is not None:
-        try:
-            text = path.read_text(encoding="ascii")
-        except (OSError, UnicodeDecodeError) as exc:
-            raise RuntimeError(f"Could not read TLE file {path}: {exc}") from exc
-        name, line1, line2 = parse_tle_text(text, str(path))
+        name, line1, line2 = read_tle_file(path)
         return name, line1, line2, str(path.resolve())
 
-    name, line1, line2 = fetch_current_tle(url)
-    return name, line1, line2, url
+    try:
+        name, line1, line2 = fetch_current_tle(url)
+        return name, line1, line2, url
+    except (RuntimeError, ValueError) as online_error:
+        print(f"Online TLE download failed: {online_error}")
+        print(f"Using fallback GOES-18 TLE: {fallback_path.resolve()}")
+        try:
+            name, line1, line2 = read_tle_file(fallback_path)
+        except (RuntimeError, ValueError) as fallback_error:
+            raise RuntimeError(
+                "The online TLE download failed, and the fallback TLE could "
+                f"not be loaded from {fallback_path}: {fallback_error}"
+            ) from fallback_error
+        return (
+            name,
+            line1,
+            line2,
+            f"{fallback_path.resolve()} (offline fallback)",
+        )
 
 
 def save_used_tle(path: Path, name: str, line1: str, line2: str) -> None:
@@ -310,14 +337,24 @@ def parse_arguments() -> argparse.Namespace:
         "--tle-file",
         type=Path,
         help=(
-            "Local GOES-18 TLE file. If omitted, the current TLE is downloaded "
-            "from CelesTrak. Use a historical TLE for historical dates."
+            "Use this local GOES-18 TLE instead of attempting an online download"
         ),
     )
     parser.add_argument(
         "--tle-url",
         default=CELESTRAK_TLE_URL,
         help="Current GOES-18 TLE URL used when --tle-file is omitted",
+    )
+    parser.add_argument(
+        "--fallback-tle-file",
+        "--fallback-tle",
+        dest="fallback_tle_file",
+        type=Path,
+        default=DEFAULT_FALLBACK_TLE_FILE,
+        help=(
+            "Local TLE used automatically if the CelesTrak download fails "
+            "(default: goes18_2026-08-27.tle beside this script)"
+        ),
     )
     parser.add_argument(
         "--max-tle-age",
@@ -382,7 +419,11 @@ def main() -> None:
         print("Downloading current GOES-18 TLE from CelesTrak...")
     else:
         print(f"Reading GOES-18 TLE from {args.tle_file}...")
-    name, line1, line2, tle_source = load_tle(args.tle_file, args.tle_url)
+    name, line1, line2, tle_source = load_tle(
+        args.tle_file,
+        args.tle_url,
+        args.fallback_tle_file,
+    )
     satellite = Satrec.twoline2rv(line1, line2, WGS72)
     if satellite.satnum != GOES18_NORAD_ID:
         raise RuntimeError(
