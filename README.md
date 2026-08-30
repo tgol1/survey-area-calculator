@@ -2,7 +2,7 @@
 George Tolis
 
 Last updated: 29 August 2026
-test
+
 ## Changelog
 Every new version number represents completion of additional assignments for project.
 
