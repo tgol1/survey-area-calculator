@@ -31,9 +31,9 @@ v2 - 30 August 2026
 Script computes the instantaneous visible fraction of sky from GOES-18 - a satellite positioned at 137W around Hawaii.
 
 The script downloads geometric Earth, Moon and Sun position vectors from the
-NASA/JPL Horizons API, with GOES-18 as the observing center.  It then treats
+NASA/JPL Horizons API or a TLE data sheet, with GOES-18 as the observing center.  It then treats
 the Earth, Moon and Sun avoidance regions as spherical caps and subtracts the
-solid angle of their union from the full sky (4*pi steradians).
+solid angle of their union from the full sky (4&pi steradians).
 
 The calculation is rotationally invariant: although the Earth direction
 moves in a satellite-fixed celestial coordinate system, the instantaneous
