@@ -27,6 +27,10 @@ v1.21 - 29 August 2026
 v2 - 30 August 2026
 - Introduced additional script that uses TLE data for ephemeris as opposed to JPL Horizons API
 
+v2.1 - 4 September 2026
+- Organized JPL and SGP4 algorithms in respective folders.
+
+
 ## Function
 Script computes the instantaneous visible fraction of sky from GOES-18 - a satellite positioned at 137W around Hawaii.
 
