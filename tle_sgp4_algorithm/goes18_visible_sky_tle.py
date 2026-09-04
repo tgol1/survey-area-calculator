@@ -27,7 +27,7 @@ from astropy.time import Time
 from astropy.utils import iers
 from sgp4.api import SGP4_ERRORS, Satrec, WGS72
 
-from goes18_visible_sky import (
+from horizons_api_algorithm.goes18_visible_sky import (
     ANGULAR_FINE_LIMITS_DEG,
     adaptive_sample_indices,
     compute_visible_sky,
