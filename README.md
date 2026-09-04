@@ -37,7 +37,7 @@ Script computes the instantaneous visible fraction of sky from GOES-18 - a satel
 The script downloads geometric Earth, Moon and Sun position vectors from the
 NASA/JPL Horizons API or a TLE data sheet, with GOES-18 as the observing center.  It then treats
 the Earth, Moon and Sun avoidance regions as spherical caps and subtracts the
-solid angle of their union from the full sky (4&pi steradians).
+solid angle of their union from the full sky (4&pi steradians). For the TLE script, a copy of the used data will be saved in the directory.
 
 The calculation is rotationally invariant: although the Earth direction
 moves in a satellite-fixed celestial coordinate system, the instantaneous

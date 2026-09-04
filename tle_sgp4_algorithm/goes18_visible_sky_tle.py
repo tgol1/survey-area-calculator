@@ -1,8 +1,17 @@
-## TLE Algorithm
-# Uses SGP4 (Simplified General Perturbations Model 4) to compute satellite positions and velocities based on Two-Line Element (TLE) sets. 
-# This algorithm is widely used in satellite tracking and orbital mechanics.
-
 #!/usr/bin/env python3
+"""Calculate GOES-18 sky visibility from a TLE instead of JPL Horizons.
+
+GOES-18 is propagated locally with the standard SGP4 model.  The SGP4 TEME
+position is transformed to GCRS with Astropy, and Astropy's built-in solar-
+system ephemeris supplies geocentric Moon and Sun positions.  No JPL Horizons
+query or downloaded SPK/BSP kernel is used.  The program first tries to obtain
+the current GOES-18 TLE from CelesTrak and automatically uses the bundled TLE
+file if that download is unavailable.
+
+This file reuses the tested spherical-cap geometry, adaptive angular sampling,
+CSV writer, and plot writer from ``goes18_visible_sky.py``.  Keep both Python
+files in the same directory.
+"""
 
 from __future__ import annotations
 
@@ -392,8 +401,15 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--output-prefix",
         type=Path,
-        default=Path("goes18_visible_sky_tle"),
-        help="Output path without extension",
+        default=(
+            Path(__file__).resolve().parent
+            / "visible_sky_data"
+            / "goes18_visible_sky_tle"
+        ),
+        help=(
+            "Output path without extension (default: visible_sky_data/"
+            "goes18_visible_sky_tle beside this script)"
+        ),
     )
     return parser.parse_args()
 

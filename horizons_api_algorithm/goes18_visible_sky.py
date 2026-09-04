@@ -775,8 +775,15 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--output-prefix",
         type=Path,
-        default=Path("goes18_visible_sky"),
-        help="Output path without extension; .csv and .png are added",
+        default=(
+            Path(__file__).resolve().parent
+            / "visible_sky_data"
+            / "goes18_visible_sky"
+        ),
+        help=(
+            "Output path without extension (default: visible_sky_data/"
+            "goes18_visible_sky beside this script)"
+        ),
     )
     return parser.parse_args()
 
