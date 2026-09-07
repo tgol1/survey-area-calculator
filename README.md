@@ -30,6 +30,8 @@ v2 - 30 August 2026
 v2.1 - 4 September 2026
 - Organized JPL and SGP4 algorithms in respective folders.
 
+v2.2 - 7 September 2026
+- Added histogram displaying average visible sky percentage by month
 
 ## Function
 Script computes the instantaneous visible fraction of sky from GOES-18 - a satellite positioned at 137W around Hawaii.

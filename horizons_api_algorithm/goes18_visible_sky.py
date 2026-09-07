@@ -713,6 +713,112 @@ def write_plot(
     plt.close(fig)
 
 
+def write_monthly_average_histogram(
+    path: Path,
+    calendar_dates: list[str],
+    visible_fraction: np.ndarray,
+    observer_name: str,
+    earth_clearance_deg: float,
+    moon_clearance_deg: float,
+    moon_reference: str,
+    sun_exclusion_deg: float,
+) -> None:
+    """Create a monthly bar chart of mean visible-sky percentages.
+
+    The input must be the complete, uniformly spaced five-minute calculation
+    grid rather than the adaptively thinned line-plot data.  The final endpoint
+    is excluded because each retained value represents the interval beginning
+    at that timestamp; the last endpoint has no following interval in the
+    requested range.
+    """
+    if len(calendar_dates) != len(visible_fraction):
+        raise ValueError("Monthly plot dates and visibility values must match.")
+    if not calendar_dates:
+        raise ValueError("Monthly plot requires at least one visibility sample.")
+
+    times = [horizons_calendar_to_utc(value) for value in calendar_dates]
+    percentages = 100.0 * np.asarray(visible_fraction, dtype=float)
+    if len(times) > 1:
+        times = times[:-1]
+        percentages = percentages[:-1]
+
+    monthly_values: dict[tuple[int, int], list[float]] = {}
+    for timestamp, percentage in zip(times, percentages):
+        month_key = (timestamp.year, timestamp.month)
+        monthly_values.setdefault(month_key, []).append(float(percentage))
+
+    month_keys = sorted(monthly_values)
+    month_labels = [
+        datetime(year, month, 1, tzinfo=timezone.utc).strftime("%b %Y")
+        for year, month in month_keys
+    ]
+    monthly_means = np.asarray(
+        [np.mean(monthly_values[month_key]) for month_key in month_keys],
+        dtype=float,
+    )
+
+    figure_width = min(24.0, max(8.5, 4.5 + 0.9 * len(month_labels)))
+    fig, ax = plt.subplots(figsize=(figure_width, 6.2))
+    positions = np.arange(len(month_labels))
+    bars = ax.bar(
+        positions,
+        monthly_means,
+        width=0.68,
+        color="#176B87",
+        edgecolor="#0F4C5C",
+        linewidth=0.8,
+    )
+    ax.bar_label(
+        bars,
+        labels=[f"{value:.3f}%" for value in monthly_means],
+        padding=3,
+        fontsize=8.5,
+    )
+
+    ax.set_xticks(positions, month_labels)
+    if len(month_labels) > 6:
+        ax.tick_params(axis="x", labelrotation=35)
+        for label in ax.get_xticklabels():
+            label.set_horizontalalignment("right")
+    ax.set_ylim(0.0, 100.0)
+    ax.set_ylabel("Average visible sky (%)")
+    ax.set_xlabel("Calendar month (UTC)")
+    ax.grid(True, axis="y", color="#D7DEE5", linewidth=0.8, alpha=0.9)
+    ax.set_axisbelow(True)
+    ax.spines[["top", "right"]].set_visible(False)
+
+    moon_wording = "Moon limb" if moon_reference == "limb" else "Moon center"
+    fig.subplots_adjust(
+        left=0.09,
+        right=0.98,
+        bottom=(0.19 if len(month_labels) > 6 else 0.13),
+        top=0.76,
+    )
+    fig.suptitle(
+        "Monthly average visible fraction of sky from GOES-18",
+        x=0.09,
+        y=0.98,
+        ha="left",
+        fontsize=14,
+        weight="bold",
+    )
+    fig.text(
+        0.09,
+        0.92,
+        "Means from the complete 5-minute grid\n"
+        f"Earth limb + {earth_clearance_deg:g} deg; "
+        f"{moon_wording} + {moon_clearance_deg:g} deg; "
+        f"Sun center + {sun_exclusion_deg:g} deg\n"
+        f"{observer_name}",
+        fontsize=8.9,
+        color="#4B5563",
+        va="top",
+        linespacing=1.25,
+    )
+    fig.savefig(path, dpi=180)
+    plt.close(fig)
+
+
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
@@ -1031,6 +1137,9 @@ def main() -> None:
 
     csv_path = args.output_prefix.with_suffix(".csv")
     plot_path = args.output_prefix.with_suffix(".png")
+    monthly_histogram_path = args.output_prefix.parent / (
+        args.output_prefix.name + "_monthly_histogram.png"
+    )
     write_results_csv(
         csv_path,
         selected_jd,
@@ -1048,6 +1157,16 @@ def main() -> None:
         sun_exclusion,
         sampling_description,
         args.step,
+    )
+    write_monthly_average_histogram(
+        monthly_histogram_path,
+        earth_calendar,
+        results["visible_fraction"],
+        observer_name,
+        args.earth_clearance,
+        args.moon_clearance,
+        args.moon_reference,
+        sun_exclusion,
     )
 
     fraction = results["visible_fraction"]
@@ -1080,6 +1199,7 @@ def main() -> None:
     )
     print(f"Wrote CSV: {csv_path.resolve()}")
     print(f"Wrote plot: {plot_path.resolve()}")
+    print(f"Wrote monthly histogram: {monthly_histogram_path.resolve()}")
 
 
 if __name__ == "__main__":

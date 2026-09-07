@@ -45,6 +45,7 @@ from horizons_api_algorithm.goes18_visible_sky import (
     step_to_minutes,
     subset_results,
     validate_date_range,
+    write_monthly_average_histogram,
     write_plot,
     write_results_csv,
 )
@@ -486,6 +487,9 @@ def main() -> None:
 
     csv_path = args.output_prefix.with_suffix(".csv")
     plot_path = args.output_prefix.with_suffix(".png")
+    monthly_histogram_path = args.output_prefix.parent / (
+        args.output_prefix.name + "_monthly_histogram.png"
+    )
     ephemeris_path = args.output_prefix.parent / (
         args.output_prefix.name + "_ephemeris.csv"
     )
@@ -509,6 +513,16 @@ def main() -> None:
         sun_exclusion,
         sampling_description,
         args.step,
+    )
+    write_monthly_average_histogram(
+        monthly_histogram_path,
+        labels,
+        results["visible_fraction"],
+        observer_name,
+        args.earth_clearance,
+        args.moon_clearance,
+        args.moon_reference,
+        sun_exclusion,
     )
 
     em_limit, es_limit, ms_limit = angular_limits_deg
@@ -548,6 +562,7 @@ def main() -> None:
     print(f"Wrote ephemeris table: {ephemeris_path.resolve()}")
     print(f"Wrote visibility CSV: {csv_path.resolve()}")
     print(f"Wrote plot: {plot_path.resolve()}")
+    print(f"Wrote monthly histogram: {monthly_histogram_path.resolve()}")
 
 
 if __name__ == "__main__":
