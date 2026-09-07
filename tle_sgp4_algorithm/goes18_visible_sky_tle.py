@@ -19,6 +19,7 @@ import argparse
 import csv
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import sys
 import warnings
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -36,8 +37,18 @@ from astropy.time import Time
 from astropy.utils import iers
 from sgp4.api import SGP4_ERRORS, Satrec, WGS72
 
+# When this file is launched directly, Python normally searches only this
+# ``tle_sgp4_algorithm`` directory. Add the repository root so the sibling
+# ``horizons_api_algorithm`` package can always be imported. This is harmless
+# when the script is launched with ``python -m`` because the root is then
+# already present.
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 from horizons_api_algorithm.goes18_visible_sky import (
     ANGULAR_FINE_LIMITS_DEG,
+    DEFAULT_EXPOSURE_SKY_POINTS,
     adaptive_sample_indices,
     compute_visible_sky,
     prompt_for_date,
@@ -48,6 +59,7 @@ from horizons_api_algorithm.goes18_visible_sky import (
     write_monthly_average_histogram,
     write_plot,
     write_results_csv,
+    write_sun_exclusion_exposure_plot,
 )
 
 
@@ -412,6 +424,15 @@ def parse_arguments() -> argparse.Namespace:
             "goes18_visible_sky_tle beside this script)"
         ),
     )
+    parser.add_argument(
+        "--exposure-sky-points",
+        type=int,
+        default=DEFAULT_EXPOSURE_SKY_POINTS,
+        help=(
+            "Deterministic sky-grid size for the 0-to-90-degree exposure "
+            "sweep (default: 8192; larger is more precise but slower)"
+        ),
+    )
     return parser.parse_args()
 
 
@@ -431,6 +452,8 @@ def main() -> None:
             raise SystemExit(f"{label} clearance must be between 0 and 60 degrees.")
     if args.max_tle_age <= 0.0:
         raise SystemExit("--max-tle-age must be positive.")
+    if args.exposure_sky_points < 1000:
+        raise SystemExit("--exposure-sky-points must be at least 1000.")
 
     if args.tle_file is None:
         print("Downloading current GOES-18 TLE from CelesTrak...")
@@ -490,6 +513,9 @@ def main() -> None:
     monthly_histogram_path = args.output_prefix.parent / (
         args.output_prefix.name + "_monthly_histogram.png"
     )
+    exposure_sweep_path = args.output_prefix.parent / (
+        args.output_prefix.name + "_sun_exclusion_exposures.png"
+    )
     ephemeris_path = args.output_prefix.parent / (
         args.output_prefix.name + "_ephemeris.csv"
     )
@@ -523,6 +549,19 @@ def main() -> None:
         args.moon_clearance,
         args.moon_reference,
         sun_exclusion,
+    )
+    print("Computing continuous-exposure Sun-angle sweep from 0 to 90 degrees...")
+    write_sun_exclusion_exposure_plot(
+        exposure_sweep_path,
+        earth_vectors,
+        moon_vectors,
+        sun_vectors,
+        observer_name,
+        args.earth_clearance,
+        args.moon_clearance,
+        args.moon_reference,
+        sun_exclusion,
+        args.exposure_sky_points,
     )
 
     em_limit, es_limit, ms_limit = angular_limits_deg
@@ -563,6 +602,7 @@ def main() -> None:
     print(f"Wrote visibility CSV: {csv_path.resolve()}")
     print(f"Wrote plot: {plot_path.resolve()}")
     print(f"Wrote monthly histogram: {monthly_histogram_path.resolve()}")
+    print(f"Wrote Sun-exclusion exposure plot: {exposure_sweep_path.resolve()}")
 
 
 if __name__ == "__main__":

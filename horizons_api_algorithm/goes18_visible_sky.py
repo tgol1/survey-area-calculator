@@ -47,6 +47,9 @@ EARTH_MEAN_RADIUS_KM = 6371.0084
 MOON_MEAN_RADIUS_KM = 1737.4
 SUN_MEAN_RADIUS_KM = 695700.0
 FULL_SKY_SR = 4.0 * math.pi
+EXPOSURE_DURATIONS_MINUTES = (10, 60, 24 * 60)
+EXPOSURE_TIME_STEP_MINUTES = 5
+DEFAULT_EXPOSURE_SKY_POINTS = 8192
 
 # Pairwise angular-separation limits that reproduce the former 79% sampling
 # trigger when combined with the existing rolling 10-point window.  The
@@ -819,6 +822,266 @@ def write_monthly_average_histogram(
     plt.close(fig)
 
 
+def fibonacci_sphere_points(point_count: int) -> np.ndarray:
+    """Return deterministic, approximately equal-area directions on a sphere."""
+    if point_count < 1:
+        raise ValueError("The spherical sky grid must contain at least one point.")
+    indices = np.arange(point_count, dtype=float) + 0.5
+    z = 1.0 - 2.0 * indices / point_count
+    radius = np.sqrt(np.maximum(0.0, 1.0 - z * z))
+    golden_angle = math.pi * (3.0 - math.sqrt(5.0))
+    longitude = golden_angle * indices
+    return np.column_stack(
+        (radius * np.cos(longitude), radius * np.sin(longitude), z)
+    )
+
+
+def _sliding_maximum(values: np.ndarray, window_size: int) -> np.ndarray:
+    """Calculate row-wise sliding maxima with a vectorized block algorithm."""
+    values = np.asarray(values)
+    row_count, column_count = values.shape
+    if not 1 <= window_size <= row_count:
+        raise ValueError("Sliding-window size is outside the available time grid.")
+
+    padding = (-row_count) % window_size
+    if padding:
+        padded = np.pad(
+            values,
+            ((0, padding), (0, 0)),
+            mode="constant",
+            constant_values=-np.inf,
+        )
+    else:
+        padded = values
+
+    blocks = padded.reshape(-1, window_size, column_count)
+    prefix = np.maximum.accumulate(blocks, axis=1).reshape(-1, column_count)
+    suffix = np.maximum.accumulate(
+        blocks[:, ::-1, :], axis=1
+    )[:, ::-1, :].reshape(-1, column_count)
+    output_rows = row_count - window_size + 1
+    starts = np.arange(output_rows)
+    return np.maximum(suffix[starts], prefix[starts + window_size - 1])
+
+
+def continuous_exposure_sun_sweep(
+    earth_vectors_km: np.ndarray,
+    moon_vectors_km: np.ndarray,
+    sun_vectors_km: np.ndarray,
+    earth_clearance_deg: float,
+    moon_clearance_deg: float,
+    moon_reference: str,
+    sky_point_count: int = DEFAULT_EXPOSURE_SKY_POINTS,
+    sky_block_size: int = 128,
+) -> tuple[np.ndarray, dict[int, np.ndarray]]:
+    """Estimate mean continuously safe sky versus Sun exclusion angle.
+
+    A deterministic Fibonacci grid represents celestial directions. For every
+    possible five-minute-aligned exposure window, a direction is counted only
+    if it stays outside the Earth, Moon, and Sun caps for the entire exposure.
+    Results are then averaged over all possible exposure start times.
+    """
+    earth_vectors = np.asarray(earth_vectors_km, dtype=float)
+    moon_vectors = np.asarray(moon_vectors_km, dtype=float)
+    sun_vectors = np.asarray(sun_vectors_km, dtype=float)
+    if not (
+        earth_vectors.shape == moon_vectors.shape == sun_vectors.shape
+        and earth_vectors.ndim == 2
+        and earth_vectors.shape[1] == 3
+    ):
+        raise ValueError("Earth, Moon, and Sun vectors must be matching N-by-3 arrays.")
+    if sky_point_count < 1000:
+        raise ValueError("Use at least 1000 sky points for the exposure sweep.")
+    if sky_block_size < 1:
+        raise ValueError("Sky-grid block size must be positive.")
+
+    sample_count = len(earth_vectors)
+    window_sizes = {
+        duration: duration // EXPOSURE_TIME_STEP_MINUTES + 1
+        for duration in EXPOSURE_DURATIONS_MINUTES
+    }
+    if sample_count < max(window_sizes.values()):
+        raise ValueError("The selected date range must span at least 24 hours.")
+
+    earth_distance = np.linalg.norm(earth_vectors, axis=1)
+    moon_distance = np.linalg.norm(moon_vectors, axis=1)
+    sun_distance = np.linalg.norm(sun_vectors, axis=1)
+    earth_unit = earth_vectors / earth_distance[:, None]
+    moon_unit = moon_vectors / moon_distance[:, None]
+    sun_unit = sun_vectors / sun_distance[:, None]
+
+    earth_radius = (
+        np.arcsin(EARTH_MEAN_RADIUS_KM / earth_distance)
+        + math.radians(earth_clearance_deg)
+    )
+    if moon_reference == "limb":
+        moon_radius = (
+            np.arcsin(MOON_MEAN_RADIUS_KM / moon_distance)
+            + math.radians(moon_clearance_deg)
+        )
+    else:
+        moon_radius = np.full(sample_count, math.radians(moon_clearance_deg))
+    earth_threshold = np.cos(earth_radius)
+    moon_threshold = np.cos(moon_radius)
+
+    sun_angles_deg = np.arange(0.0, 91.0, 1.0)
+    sun_thresholds = np.cos(np.radians(sun_angles_deg))
+    safe_counts = {
+        duration: np.zeros(len(sun_angles_deg), dtype=np.int64)
+        for duration in EXPOSURE_DURATIONS_MINUTES
+    }
+    window_counts = {
+        duration: sample_count - window_size + 1
+        for duration, window_size in window_sizes.items()
+    }
+    sky_points = fibonacci_sphere_points(sky_point_count)
+
+    for block_start in range(0, sky_point_count, sky_block_size):
+        block = sky_points[block_start : block_start + sky_block_size]
+        earth_dot = np.asarray(earth_unit @ block.T, dtype=np.float32)
+        moon_dot = np.asarray(moon_unit @ block.T, dtype=np.float32)
+        sun_dot = np.asarray(sun_unit @ block.T, dtype=np.float32)
+        earth_moon_excluded = (
+            (earth_dot >= earth_threshold[:, None])
+            | (moon_dot >= moon_threshold[:, None])
+        )
+
+        cumulative_excluded = np.zeros(
+            (sample_count + 1, len(block)), dtype=np.int32
+        )
+        np.cumsum(
+            earth_moon_excluded,
+            axis=0,
+            dtype=np.int32,
+            out=cumulative_excluded[1:],
+        )
+
+        for duration, window_size in window_sizes.items():
+            earth_moon_safe = (
+                cumulative_excluded[window_size:]
+                - cumulative_excluded[:-window_size]
+                == 0
+            )
+            closest_sun_dot = _sliding_maximum(sun_dot, window_size)
+            eligible_sun_dots = np.sort(closest_sun_dot[earth_moon_safe])
+            safe_counts[duration] += np.searchsorted(
+                eligible_sun_dots,
+                sun_thresholds,
+                side="left",
+            )
+
+    mean_visible_percent = {
+        duration: (
+            100.0
+            * safe_counts[duration]
+            / (window_counts[duration] * sky_point_count)
+        )
+        for duration in EXPOSURE_DURATIONS_MINUTES
+    }
+    return sun_angles_deg, mean_visible_percent
+
+
+def write_sun_exclusion_exposure_plot(
+    path: Path,
+    earth_vectors_km: np.ndarray,
+    moon_vectors_km: np.ndarray,
+    sun_vectors_km: np.ndarray,
+    observer_name: str,
+    earth_clearance_deg: float,
+    moon_clearance_deg: float,
+    moon_reference: str,
+    selected_sun_exclusion_deg: float,
+    sky_point_count: int,
+) -> None:
+    """Create three exposure-duration plots over Sun angles from 0 to 90 deg."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    sun_angles, exposure_curves = continuous_exposure_sun_sweep(
+        earth_vectors_km,
+        moon_vectors_km,
+        sun_vectors_km,
+        earth_clearance_deg,
+        moon_clearance_deg,
+        moon_reference,
+        sky_point_count,
+    )
+
+    duration_labels = {
+        10: "10-minute continuous exposure",
+        60: "1-hour continuous exposure",
+        24 * 60: "24-hour continuous exposure",
+    }
+    fig, axes = plt.subplots(
+        3,
+        1,
+        figsize=(11.5, 12.0),
+        sharex=True,
+    )
+    for axis, duration in zip(axes, EXPOSURE_DURATIONS_MINUTES):
+        curve = exposure_curves[duration]
+        axis.plot(sun_angles, curve, color="#176B87", linewidth=2.0)
+        axis.fill_between(sun_angles, curve, 0.0, color="#64CCC5", alpha=0.14)
+        axis.axvline(
+            selected_sun_exclusion_deg,
+            color="#F59E0B",
+            linestyle="--",
+            linewidth=1.4,
+        )
+        selected_index = int(round(selected_sun_exclusion_deg))
+        axis.scatter(
+            [selected_sun_exclusion_deg],
+            [curve[selected_index]],
+            color="#F59E0B",
+            s=32,
+            zorder=4,
+        )
+        axis.set_title(duration_labels[duration], loc="left", fontsize=11, weight="bold")
+        axis.set_ylabel("Mean safe sky (%)")
+        axis.set_ylim(0.0, 100.0)
+        axis.set_xlim(0.0, 90.0)
+        axis.set_xticks(np.arange(0.0, 91.0, 10.0))
+        axis.grid(True, color="#D7DEE5", linewidth=0.8, alpha=0.9)
+        axis.set_axisbelow(True)
+        axis.spines[["top", "right"]].set_visible(False)
+        axis.text(
+            0.99,
+            0.94,
+            f"At {selected_sun_exclusion_deg:g} deg: "
+            f"{curve[selected_index]:.3f}%",
+            transform=axis.transAxes,
+            ha="right",
+            va="top",
+            fontsize=9,
+            color="#4B5563",
+        )
+
+    axes[-1].set_xlabel("Sun exclusion angle from center (degrees)")
+    moon_wording = "Moon limb" if moon_reference == "limb" else "Moon center"
+    fig.subplots_adjust(left=0.10, right=0.97, bottom=0.07, top=0.82, hspace=0.38)
+    fig.suptitle(
+        "Continuously visible sky versus Sun exclusion angle",
+        x=0.10,
+        y=0.98,
+        ha="left",
+        fontsize=15,
+        weight="bold",
+    )
+    fig.text(
+        0.10,
+        0.94,
+        f"Mean over all 5-minute-aligned exposure starts; "
+        f"{sky_point_count:,}-point deterministic sky grid\n"
+        f"Earth limb + {earth_clearance_deg:g} deg; "
+        f"{moon_wording} + {moon_clearance_deg:g} deg | {observer_name}",
+        ha="left",
+        va="top",
+        fontsize=9.2,
+        color="#4B5563",
+        linespacing=1.3,
+    )
+    fig.savefig(path, dpi=180)
+    plt.close(fig)
+
+
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
@@ -889,6 +1152,15 @@ def parse_arguments() -> argparse.Namespace:
         help=(
             "Output path without extension (default: visible_sky_data/"
             "goes18_visible_sky beside this script)"
+        ),
+    )
+    parser.add_argument(
+        "--exposure-sky-points",
+        type=int,
+        default=DEFAULT_EXPOSURE_SKY_POINTS,
+        help=(
+            "Deterministic sky-grid size for the 0-to-90-degree exposure "
+            "sweep (default: 8192; larger is more precise but slower)"
         ),
     )
     return parser.parse_args()
@@ -1070,6 +1342,8 @@ def main() -> None:
     ):
         if not 0.0 <= clearance <= 60.0:
             raise SystemExit(f"{label} clearance must be between 0 and 60 degrees.")
+    if args.exposure_sky_points < 1000:
+        raise SystemExit("--exposure-sky-points must be at least 1000.")
 
     print("Downloading Earth vectors from JPL Horizons...")
     earth_jd, earth_calendar, earth_vectors, observer_name = fetch_vectors(
@@ -1140,6 +1414,9 @@ def main() -> None:
     monthly_histogram_path = args.output_prefix.parent / (
         args.output_prefix.name + "_monthly_histogram.png"
     )
+    exposure_sweep_path = args.output_prefix.parent / (
+        args.output_prefix.name + "_sun_exclusion_exposures.png"
+    )
     write_results_csv(
         csv_path,
         selected_jd,
@@ -1167,6 +1444,19 @@ def main() -> None:
         args.moon_clearance,
         args.moon_reference,
         sun_exclusion,
+    )
+    print("Computing continuous-exposure Sun-angle sweep from 0 to 90 degrees...")
+    write_sun_exclusion_exposure_plot(
+        exposure_sweep_path,
+        earth_vectors,
+        moon_vectors,
+        sun_vectors,
+        observer_name,
+        args.earth_clearance,
+        args.moon_clearance,
+        args.moon_reference,
+        sun_exclusion,
+        args.exposure_sky_points,
     )
 
     fraction = results["visible_fraction"]
@@ -1200,6 +1490,7 @@ def main() -> None:
     print(f"Wrote CSV: {csv_path.resolve()}")
     print(f"Wrote plot: {plot_path.resolve()}")
     print(f"Wrote monthly histogram: {monthly_histogram_path.resolve()}")
+    print(f"Wrote Sun-exclusion exposure plot: {exposure_sweep_path.resolve()}")
 
 
 if __name__ == "__main__":
