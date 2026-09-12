@@ -53,6 +53,29 @@ fraction of sky depends only on cap sizes and Earth-Moon-Sun angular separation.
 Minimum fractions of visible sky represent minimum visibility; earth, moon and sun exclusion regions do not overlap and both
 independently block portions of the sky. Likewise, maximum fractions of visible sky represent maximum visibility; earth, moon and sun have minimal center-to-center separation. Plateaus at minimum visibility represent the duration that the Earth, Moon and Sun exclusion regions are completely separated.
 
+## Algorithm Comparison
+
+The compare_algorithms.py script compares the visible-sky results produced by the NASA/JPL Horizons and TLE/SGP4 algorithms. It runs both methods using the same date range, sampling interval, and Sun-exclusion angle, then matches their output values at common UTC timestamps.
+
+The difference is calculated as:
+
+[
+\text{Difference} =
+\text{Horizons visible sky} -
+\text{TLE/SGP4 visible sky}
+]
+
+The generated PNG contains two panels:
+
+A time-domain dot plot showing how the difference between the two algorithms changes over time.
+A normalized histogram showing the distribution of those differences, with a Gaussian curve based on the sample mean and standard deviation.
+
+A mean difference near zero indicates little systematic bias between the algorithms. The standard deviation, (\sigma), describes the empirical spread of their visible-sky predictions and can be reported as the approximate one-standard-deviation computational disagreement. For example, (\sigma = 0.0072) percentage points means the two methods typically differ by approximately (0.0072) percentage points in calculated visible-sky coverage.
+
+The histogram may not be perfectly Gaussian. Visible-sky plateaus can produce many differences close to zero, while orbital motion can create periodic or clustered residuals. Therefore, the Gaussian width should be interpreted as the spread of the visible-sky differences over the selected interval, rather than as a direct measurement of the satellite’s positional error in kilometers.
+
+For a meaningful comparison, the selected date range should be close to the epoch of the TLE being used. Propagating a TLE far from its epoch can introduce large, structured errors that do not represent the normal short-term accuracy of SGP4. The TLE included is from 27 August 2026.
+
 
 ## How to Use
 - Input date range as prompted in YYYY-MM-DD format.
