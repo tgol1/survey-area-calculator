@@ -528,7 +528,7 @@ def main() -> None:
     epoch_label = epoch_datetime.strftime("%Y-%m-%d %H:%M UTC")
     observer_name = "GOES-18 TLE/SGP4"
     sampling_description = f"5 min near angular alignments; {args.step} elsewhere"
-    write_plot(
+    zoom_start, zoom_stop = write_plot(
         plot_path,
         selected_labels,
         selected_results["visible_fraction"],
@@ -539,6 +539,8 @@ def main() -> None:
         sun_exclusion,
         sampling_description,
         args.step,
+        labels,
+        results["visible_fraction"],
     )
     write_monthly_average_histogram(
         monthly_histogram_path,
@@ -601,6 +603,11 @@ def main() -> None:
     print(f"Wrote ephemeris table: {ephemeris_path.resolve()}")
     print(f"Wrote visibility CSV: {csv_path.resolve()}")
     print(f"Wrote plot: {plot_path.resolve()}")
+    print(
+        "Two-day section included in the main plot: "
+        f"{zoom_start:%Y-%m-%d %H:%M} through "
+        f"{zoom_stop:%Y-%m-%d %H:%M} UTC"
+    )
     print(f"Wrote monthly histogram: {monthly_histogram_path.resolve()}")
     print(f"Wrote Sun-exclusion exposure plot: {exposure_sweep_path.resolve()}")
 

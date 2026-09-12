@@ -15,13 +15,14 @@ from __future__ import annotations
 
 import argparse
 import csv
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import io
 import json
 import math
 import os
 from pathlib import Path
 import re
+import secrets
 import tempfile
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
@@ -35,7 +36,6 @@ os.environ.setdefault(
 )
 import matplotlib.dates as mdates  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
-from matplotlib.patches import Patch  # noqa: E402
 
 
 HORIZONS_API = "https://ssd.jpl.nasa.gov/api/horizons.api"
@@ -50,6 +50,7 @@ FULL_SKY_SR = 4.0 * math.pi
 EXPOSURE_DURATIONS_MINUTES = (10, 60, 24 * 60)
 EXPOSURE_TIME_STEP_MINUTES = 5
 DEFAULT_EXPOSURE_SKY_POINTS = 8192
+TWO_DAY_ZOOM_DURATION = timedelta(days=2)
 
 # Pairwise angular-separation limits that reproduce the former 79% sampling
 # trigger when combined with the existing rolling 10-point window.  The
@@ -602,16 +603,39 @@ def write_plot(
     sun_exclusion_deg: float,
     sample_step: str,
     coarse_step_label: str,
-) -> None:
-    """Create a filled line plot with a color-coded x-axis sampling strip."""
+    full_resolution_calendar_dates: list[str] | None = None,
+    full_resolution_visible_fraction: np.ndarray | None = None,
+) -> tuple[datetime, datetime]:
+    """Create the full-range plot and a five-minute two-day close-up."""
     path.parent.mkdir(parents=True, exist_ok=True)
     times = [horizons_calendar_to_utc(value) for value in calendar_dates]
     percent = 100.0 * visible_fraction
 
+    if (full_resolution_calendar_dates is None) != (
+        full_resolution_visible_fraction is None
+    ):
+        raise ValueError(
+            "Full-resolution dates and visible fractions must be supplied together."
+        )
+    zoom_source_dates = full_resolution_calendar_dates or calendar_dates
+    zoom_source_fraction = (
+        np.asarray(full_resolution_visible_fraction, dtype=float)
+        if full_resolution_visible_fraction is not None
+        else np.asarray(visible_fraction, dtype=float)
+    )
+    zoom_times, zoom_fraction, zoom_start, zoom_stop = select_two_day_zoom(
+        zoom_source_dates,
+        zoom_source_fraction,
+    )
+    zoom_percent = 100.0 * zoom_fraction
+
     span_days = max(1.0, (times[-1] - times[0]).total_seconds() / 86400.0)
     figure_width = min(24.0, max(10.5, 6.0 + 0.5 * span_days))
-    fig, ax = plt.subplots(
-        figsize=(figure_width, 6.2),
+    fig, (ax, zoom_ax) = plt.subplots(
+        2,
+        1,
+        figsize=(figure_width, 10.5),
+        gridspec_kw={"height_ratios": (1.55, 1.0)},
         constrained_layout=True,
     )
     ax.plot(times, percent, color="#176B87", linewidth=1.5)
@@ -622,42 +646,31 @@ def write_plot(
         color="#64CCC5",
         alpha=0.16,
     )
-
-    # Show the actual resolution of every interval as a thin strip along the
-    # bottom x-axis: blue for 5-minute peak data and orange for coarse data.
-    fine_color = "#64748B"
-    coarse_color = "#F59E0B"
-    if len(times) > 1:
-        interval_is_fine = [
-            math.isclose(
-                (stop - start).total_seconds() / 60.0,
-                5.0,
-                abs_tol=0.1,
-            )
-            for start, stop in zip(times[:-1], times[1:])
-        ]
-        span_start = 0
-        for interval_index in range(1, len(interval_is_fine)):
-            if interval_is_fine[interval_index] != interval_is_fine[span_start]:
-                ax.axvspan(
-                    times[span_start],
-                    times[interval_index],
-                    ymin=0.0,
-                    ymax=0.025,
-                    color=(fine_color if interval_is_fine[span_start] else coarse_color),
-                    alpha=0.95,
-                    zorder=4,
-                )
-                span_start = interval_index
-        ax.axvspan(
-            times[span_start],
-            times[-1],
-            ymin=0.0,
-            ymax=0.025,
-            color=(fine_color if interval_is_fine[span_start] else coarse_color),
-            alpha=0.95,
-            zorder=4,
-        )
+    zoom_highlight_color = "#7C3AED"
+    zoom_highlight = ax.axvspan(
+        zoom_start,
+        zoom_stop,
+        color=zoom_highlight_color,
+        alpha=0.16,
+        zorder=0.8,
+        label="Two-day section shown below",
+    )
+    ax.axvline(
+        zoom_start,
+        color=zoom_highlight_color,
+        linewidth=1.1,
+        linestyle="--",
+        alpha=0.9,
+        zorder=3,
+    )
+    ax.axvline(
+        zoom_stop,
+        color=zoom_highlight_color,
+        linewidth=1.1,
+        linestyle="--",
+        alpha=0.9,
+        zorder=3,
+    )
 
     spread = float(np.max(percent) - np.min(percent))
     padding = max(0.15, 0.12 * spread)
@@ -676,20 +689,11 @@ def write_plot(
     ax.tick_params(axis="x", which="major", labelrotation=30)
     for label in ax.get_xticklabels(which="major"):
         label.set_horizontalalignment("right")
-
     ax.legend(
-        handles=[
-            Patch(
-                facecolor=coarse_color,
-                label=f"{coarse_step_label} baseline sampling",
-            ),
-            Patch(facecolor=fine_color, label="5-minute angular region"),
-        ],
-        title="X-axis sampling",
+        handles=[zoom_highlight],
         loc="upper right",
         frameon=True,
         fontsize=8.5,
-        title_fontsize=8.5,
     )
 
     moon_wording = "Moon limb" if moon_reference == "limb" else "Moon center"
@@ -712,8 +716,93 @@ def write_plot(
         color="#4B5563",
         va="bottom",
     )
+
+    zoom_ax.plot(
+        zoom_times,
+        zoom_percent,
+        color="#176B87",
+        linewidth=1.35,
+    )
+    zoom_ax.fill_between(
+        zoom_times,
+        zoom_percent,
+        float(np.min(zoom_percent) - 1.0),
+        color="#64CCC5",
+        alpha=0.16,
+    )
+    zoom_spread = float(np.max(zoom_percent) - np.min(zoom_percent))
+    zoom_padding = max(0.08, 0.08 * zoom_spread)
+    zoom_ax.set_ylim(
+        float(np.min(zoom_percent) - zoom_padding),
+        float(np.max(zoom_percent) + zoom_padding),
+    )
+    zoom_ax.set_xlim(zoom_start, zoom_stop)
+    zoom_ax.set_ylabel("Visible sky (%)")
+    zoom_ax.set_xlabel("Time (UTC)")
+    zoom_ax.grid(True, which="major", color="#D7DEE5", linewidth=0.8, alpha=0.9)
+    zoom_ax.grid(True, which="minor", color="#E8EDF2", linewidth=0.5, alpha=0.55)
+    zoom_ax.spines[["top", "right"]].set_visible(False)
+    zoom_ax.xaxis.set_major_locator(
+        mdates.HourLocator(byhour=(0, 6, 12, 18), tz=timezone.utc)
+    )
+    zoom_ax.xaxis.set_major_formatter(
+        mdates.DateFormatter("%b %d\n%H:%M", tz=timezone.utc)
+    )
+    zoom_ax.xaxis.set_minor_locator(
+        mdates.HourLocator(interval=1, tz=timezone.utc)
+    )
+    zoom_ax.set_title(
+        "Fine-scale daily variation (full five-minute resolution)\n"
+        f"Randomly selected two-day section: {zoom_start:%Y-%m-%d %H:%M} to "
+        f"{zoom_stop:%Y-%m-%d %H:%M} UTC",
+        loc="left",
+        fontsize=11,
+        weight="bold",
+        pad=9,
+    )
+
     fig.savefig(path, dpi=180)
     plt.close(fig)
+    return zoom_start, zoom_stop
+
+
+def select_two_day_zoom(
+    calendar_dates: list[str],
+    visible_fraction: np.ndarray,
+) -> tuple[list[datetime], np.ndarray, datetime, datetime]:
+    """Select a new random continuous 48-hour window for each program run."""
+    times = [horizons_calendar_to_utc(value) for value in calendar_dates]
+    fraction = np.asarray(visible_fraction, dtype=float)
+    if len(times) != len(fraction):
+        raise ValueError("Calendar dates and visible fractions must have equal length.")
+    if not times:
+        raise ValueError("At least one sample is required for the two-day zoom plot.")
+
+    available_duration = times[-1] - times[0]
+    if available_duration <= TWO_DAY_ZOOM_DURATION:
+        window_start = times[0]
+        window_stop = times[-1]
+    else:
+        latest_start = times[-1] - TWO_DAY_ZOOM_DURATION
+        valid_start_indices = [
+            index
+            for index, timestamp in enumerate(times)
+            if timestamp <= latest_start
+        ]
+        random_start_index = valid_start_indices[
+            secrets.randbelow(len(valid_start_indices))
+        ]
+        window_start = times[random_start_index]
+        window_stop = window_start + TWO_DAY_ZOOM_DURATION
+
+    indices = [
+        index
+        for index, timestamp in enumerate(times)
+        if window_start <= timestamp <= window_stop
+    ]
+    zoom_times = [times[index] for index in indices]
+    zoom_fraction = fraction[indices]
+    return zoom_times, zoom_fraction, window_start, window_stop
 
 
 def write_monthly_average_histogram(
@@ -1423,7 +1512,7 @@ def main() -> None:
         selected_calendar,
         selected_results,
     )
-    write_plot(
+    zoom_start, zoom_stop = write_plot(
         plot_path,
         selected_calendar,
         selected_results["visible_fraction"],
@@ -1434,6 +1523,8 @@ def main() -> None:
         sun_exclusion,
         sampling_description,
         args.step,
+        earth_calendar,
+        results["visible_fraction"],
     )
     write_monthly_average_histogram(
         monthly_histogram_path,
@@ -1489,6 +1580,11 @@ def main() -> None:
     )
     print(f"Wrote CSV: {csv_path.resolve()}")
     print(f"Wrote plot: {plot_path.resolve()}")
+    print(
+        "Two-day section included in the main plot: "
+        f"{zoom_start:%Y-%m-%d %H:%M} through "
+        f"{zoom_stop:%Y-%m-%d %H:%M} UTC"
+    )
     print(f"Wrote monthly histogram: {monthly_histogram_path.resolve()}")
     print(f"Wrote Sun-exclusion exposure plot: {exposure_sweep_path.resolve()}")
 
