@@ -36,6 +36,7 @@ v2.2/3 - 7 September 2026
 
 v3 - 12 September 2026
 - Script now highlights random two day section of visible sky data, showing finer scale
+- Added script that runs both algorithms and compares values, highlighting Gaussian width, center and computational error.
 
 ## Function
 Script computes the instantaneous visible fraction of sky from GOES-18 - a satellite positioned at 137W around Hawaii.
