@@ -30,7 +30,7 @@ v2 - 30 August 2026
 v2.1 - 4 September 2026
 - Organized JPL and SGP4 algorithms in respective folders.
 
-v2.2/3 - 7 September 2026
+v2.2 - 7 September 2026
 - Added histogram displaying average visible sky percentage by month
 - Added graphs for visible sky as a function of sun exclusion angle, using average times through 10 minute, 1 hour and 24 hour time periods.
 
