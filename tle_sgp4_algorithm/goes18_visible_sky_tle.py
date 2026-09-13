@@ -236,6 +236,12 @@ def propagate_tle_ephemeris(
     # sufficient Earth-orientation data for this transformation; it will not
     # attempt to update those tables over the network.
     iers.conf.auto_download = False
+    # Hosted/offline environments can have a bundled IERS-A table whose
+    # predictive rows are older than Astropy's default 30-day freshness
+    # limit. Allow those bundled rows instead of failing the TEME-to-GCRS
+    # transformation. This affects Earth-orientation interpolation only; it
+    # does not remove the need to propagate close to the TLE epoch.
+    iers.conf.auto_max_age = None
     teme_coordinates = TEME(
         CartesianRepresentation(teme_position.T * u.km),
         obstime=times,
