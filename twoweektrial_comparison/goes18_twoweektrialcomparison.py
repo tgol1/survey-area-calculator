@@ -8,7 +8,8 @@ hour-by-hour mean profile for each window with a thicker line.
 
 Place this file at:
 
-    survey-area-calculator/algorithm_comparison/two_window_daily_variation.py
+    survey-area-calculator/twoweektrial_comparison/
+        goes18_twoweektrialcomparison.py
 
 The existing JPL script must remain at:
 
@@ -55,7 +56,7 @@ try:
 except ModuleNotFoundError as exc:
     raise SystemExit(
         "Could not import horizons_api_algorithm.goes18_visible_sky. "
-        "Place this script in the repository's algorithm_comparison folder."
+        "Place this script in the repository's twoweektrial_comparison folder."
     ) from exc
 
 

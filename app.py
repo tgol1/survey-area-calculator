@@ -29,8 +29,8 @@ COMPARISON_SCRIPT = (
 )
 DAILY_VARIATION_SCRIPT = (
     PROJECT_ROOT
-    / "algorithm_comparison"
-    / "two_window_daily_variation.py"
+    / "twoweektrial_comparison"
+    / "goes18_twoweektrialcomparison.py"
 )
 TLE_FILE = (
     PROJECT_ROOT / "tle_sgp4_algorithm" / "goes18_2026-08-27.tle"
