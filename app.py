@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import csv
-from datetime import date
+from datetime import date, timedelta
 import io
 from pathlib import Path
 import subprocess
@@ -27,6 +27,11 @@ COMPARISON_SCRIPT = (
     / "algorithm_comparison"
     / "goes18_algorithm_comparison.py"
 )
+DAILY_VARIATION_SCRIPT = (
+    PROJECT_ROOT
+    / "algorithm_comparison"
+    / "two_window_daily_variation.py"
+)
 TLE_FILE = (
     PROJECT_ROOT / "tle_sgp4_algorithm" / "goes18_2026-08-27.tle"
 )
@@ -35,6 +40,10 @@ TLE_EPOCH = date(2026, 8, 27)
 RECOMMENDED_TLE_WINDOW_DAYS = 14
 MAX_HORIZONS_SPAN_DAYS = 34
 DEFAULT_DATE_RANGE = (date(2026, 8, 26), date(2026, 8, 28))
+DEFAULT_DAILY_WINDOW_1 = (date(2026, 1, 1), date(2026, 1, 15))
+DEFAULT_DAILY_WINDOW_2 = (date(2026, 8, 1), date(2026, 8, 15))
+DEFAULT_RANDOM_POOL = (date(2026, 1, 1), date(2027, 1, 1))
+DAILY_WINDOW_DAYS = 14
 
 
 st.set_page_config(
@@ -58,6 +67,42 @@ def normalize_date_range(selected_dates: object) -> tuple[date, date] | None:
         st.error("The end date must be later than the start date.")
         return None
     return start, stop
+
+
+def validate_exact_daily_window(
+    start: date,
+    stop: date,
+    label: str,
+) -> bool:
+    """Require an exact 14-day half-open range for daily-profile analysis."""
+    span_days = (stop - start).days
+    if span_days == DAILY_WINDOW_DAYS:
+        return True
+    st.error(
+        f"{label} is {span_days} days long. Its end date must be exactly "
+        f"{DAILY_WINDOW_DAYS} days after its start date. The end date is an "
+        "exclusive boundary."
+    )
+    return False
+
+
+def daily_windows_overlap(
+    first: tuple[date, date],
+    second: tuple[date, date],
+) -> bool:
+    """Return whether two half-open manual daily-analysis windows overlap."""
+    return first[0] < second[1] and second[0] < first[1]
+
+
+def validate_random_pool(start: date, stop: date) -> bool:
+    """Require enough dates for two non-overlapping random 14-day windows."""
+    if stop - start >= timedelta(days=2 * DAILY_WINDOW_DAYS):
+        return True
+    st.error(
+        "The random-selection pool must span at least 28 days so the script "
+        "can select two non-overlapping 14-day windows."
+    )
+    return False
 
 
 def validate_horizons_span(start: date, stop: date) -> bool:
@@ -394,6 +439,94 @@ def run_comparison(start: date, stop: date, sun_angle: int) -> None:
         )
 
 
+def run_daily_variation(
+    selection: str,
+    sun_angle: int,
+    first_window: tuple[date, date] | None = None,
+    second_window: tuple[date, date] | None = None,
+    random_pool: tuple[date, date] | None = None,
+) -> None:
+    """Run the two-window JPL daily-variation analysis and retain its outputs."""
+    if not required_files_exist([DAILY_VARIATION_SCRIPT, HORIZONS_SCRIPT]):
+        return
+
+    with tempfile.TemporaryDirectory(prefix="goes18-daily-variation-") as directory:
+        output_directory = Path(directory)
+        output_png = output_directory / "two_window_daily_variation.png"
+        output_csv = output_directory / "two_window_daily_variation.csv"
+        command = [
+            sys.executable,
+            str(DAILY_VARIATION_SCRIPT),
+            "--selection",
+            selection,
+            "--sun-exclusion",
+            str(sun_angle),
+            "--output",
+            str(output_png),
+            "--csv-output",
+            str(output_csv),
+        ]
+        if selection == "manual":
+            if first_window is None or second_window is None:
+                st.error("Both manual 14-day windows are required.")
+                return
+            command.extend(
+                [
+                    "--window-1-start",
+                    first_window[0].isoformat(),
+                    "--window-1-stop",
+                    first_window[1].isoformat(),
+                    "--window-2-start",
+                    second_window[0].isoformat(),
+                    "--window-2-stop",
+                    second_window[1].isoformat(),
+                ]
+            )
+        else:
+            if random_pool is None:
+                st.error("A random-selection date pool is required.")
+                return
+            command.extend(
+                [
+                    "--random-earliest",
+                    random_pool[0].isoformat(),
+                    "--random-latest",
+                    random_pool[1].isoformat(),
+                ]
+            )
+
+        with st.spinner(
+            "Downloading hourly JPL ephemerides for both 14-day windows..."
+        ):
+            return_code, log = run_command(command)
+
+        csv_bytes = read_file_bytes(output_csv)
+        save_result(
+            "daily_variation_result",
+            return_code,
+            log,
+            images={
+                "daily_variation": (
+                    read_file_bytes(output_png),
+                    "Hourly daily profiles for two 14-day JPL Horizons windows; thick lines show each window's mean profile.",
+                ),
+            },
+            downloads={
+                "csv": (
+                    csv_bytes,
+                    "two_window_daily_variation.csv",
+                    "text/csv",
+                ),
+                "png": (
+                    read_file_bytes(output_png),
+                    "two_window_daily_variation.png",
+                    "image/png",
+                ),
+            },
+            statistics=visible_sky_statistics(csv_bytes),
+        )
+
+
 st.title("GOES-18 Visible-Sky Calculator")
 st.caption(
     "Interactive Earth, Moon, and Sun avoidance analysis for GOES-18 near 137°W"
@@ -426,7 +559,17 @@ with st.expander("README.md"):
         )
 
 
-with st.expander("JPL Horizons method"):
+method_tabs = st.tabs(
+    [
+        "JPL Horizons",
+        "TLE/SGP4",
+        "Algorithm comparison",
+        "Two-week daily variation",
+    ]
+)
+
+
+with method_tabs[0]:
     st.markdown(
         "Downloads geometric Earth, Moon, and Sun vectors from NASA/JPL "
         "Horizons with GOES-18 as the observing center."
@@ -458,7 +601,7 @@ with st.expander("JPL Horizons method"):
     render_result("horizons_result")
 
 
-with st.expander("TLE/SGP4 method"):
+with method_tabs[1]:
     st.info(
         "This website uses the saved GOES-18 TLE with an epoch of "
         "August 27, 2026. SGP4 is most reliable when propagated close to "
@@ -492,7 +635,7 @@ with st.expander("TLE/SGP4 method"):
     render_result("tle_result")
 
 
-with st.expander("Algorithm comparison"):
+with method_tabs[2]:
     st.warning(
         "The comparison uses the saved GOES-18 TLE with an epoch of "
         "August 27, 2026. Selecting a date window far outside this epoch "
@@ -526,3 +669,98 @@ with st.expander("Algorithm comparison"):
             show_tle_epoch_warning(*selected, comparison=True)
             run_comparison(*selected, comparison_sun_angle)
     render_result("comparison_result")
+
+
+with method_tabs[3]:
+    st.markdown(
+        "Compare the hour-by-hour daily variation in visible sky across two "
+        "14-day windows using the JPL Horizons method. Thin lines represent "
+        "individual UTC days, while thick lines show each window's hourly mean."
+    )
+    st.info(
+        "Every manually entered window must be exactly 14 days. The website "
+        "and the calculation script both reject a window whose end date is not "
+        "exactly 14 days after its start date. The end date is an exclusive boundary."
+    )
+
+    daily_selection_label = st.radio(
+        "Date-window selection",
+        options=("Manual 14-day windows", "Random 14-day windows"),
+        horizontal=True,
+        key="daily_variation_selection",
+    )
+    daily_selection = (
+        "manual" if daily_selection_label.startswith("Manual") else "random"
+    )
+
+    with st.form("daily_variation_form"):
+        if daily_selection == "manual":
+            daily_window_1_dates = st.date_input(
+                "Window 1 UTC date range",
+                value=DEFAULT_DAILY_WINDOW_1,
+                format="YYYY-MM-DD",
+                key="daily_window_1_dates",
+            )
+            daily_window_2_dates = st.date_input(
+                "Window 2 UTC date range",
+                value=DEFAULT_DAILY_WINDOW_2,
+                format="YYYY-MM-DD",
+                key="daily_window_2_dates",
+            )
+        else:
+            daily_random_pool = st.date_input(
+                "UTC date pool for random selection",
+                value=DEFAULT_RANDOM_POOL,
+                format="YYYY-MM-DD",
+                key="daily_random_pool",
+                help=(
+                    "The script randomly chooses two non-overlapping 14-day "
+                    "windows within this range."
+                ),
+            )
+
+        daily_sun_angle = st.radio(
+            "Sun exclusion angle",
+            options=(30, 45),
+            index=1,
+            horizontal=True,
+            format_func=lambda angle: f"{angle}°",
+            key="daily_variation_sun_angle",
+        )
+        daily_submit = st.form_submit_button(
+            "Run two-week daily variation",
+            type="primary",
+        )
+
+    if daily_submit:
+        if daily_selection == "manual":
+            first_window = normalize_date_range(daily_window_1_dates)
+            second_window = normalize_date_range(daily_window_2_dates)
+            if first_window and second_window:
+                first_is_valid = validate_exact_daily_window(
+                    *first_window,
+                    "Window 1",
+                )
+                second_is_valid = validate_exact_daily_window(
+                    *second_window,
+                    "Window 2",
+                )
+                if first_is_valid and second_is_valid:
+                    if daily_windows_overlap(first_window, second_window):
+                        st.error("The two manual 14-day windows must not overlap.")
+                    else:
+                        run_daily_variation(
+                            "manual",
+                            daily_sun_angle,
+                            first_window=first_window,
+                            second_window=second_window,
+                        )
+        else:
+            random_pool = normalize_date_range(daily_random_pool)
+            if random_pool and validate_random_pool(*random_pool):
+                run_daily_variation(
+                    "random",
+                    daily_sun_angle,
+                    random_pool=random_pool,
+                )
+    render_result("daily_variation_result")
