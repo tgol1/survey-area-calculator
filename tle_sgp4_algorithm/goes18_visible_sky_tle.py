@@ -56,6 +56,7 @@ from horizons_api_algorithm.goes18_visible_sky import (
     step_to_minutes,
     subset_results,
     validate_date_range,
+    vector_right_ascension_declination,
     write_monthly_average_histogram,
     write_plot,
     write_results_csv,
@@ -499,6 +500,13 @@ def main() -> None:
         args.moon_reference,
         sun_exclusion,
     )
+    # The propagated spacecraft vector is already geocentric GCRS, so its
+    # direction can be written directly as right ascension and declination.
+    goes18_ra_deg, goes18_dec_deg = vector_right_ascension_declination(
+        np.asarray(ephemeris["goes_gcrs_position_km"])
+    )
+    results["goes18_ra_deg"] = goes18_ra_deg
+    results["goes18_dec_deg"] = goes18_dec_deg
 
     labels = calendar_labels(datetimes)
     angular_limits_deg = ANGULAR_FINE_LIMITS_DEG[sun_exclusion]

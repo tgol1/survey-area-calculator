@@ -371,7 +371,7 @@ def run_comparison(start: date, stop: date, sun_angle: int) -> None:
             images={
                 "comparison": (
                     read_file_bytes(comparison_png),
-                    "JPL Horizons minus TLE/SGP4 visible-sky differences and Gaussian-reference histogram.",
+                    "GOES-18 JPL Horizons versus TLE/SGP4 angular separation in arcseconds, with an empirical separation histogram.",
                 ),
             },
             downloads={
@@ -406,7 +406,8 @@ with st.expander("About", expanded=True):
         This project calculates the instantaneous fraction of the celestial sky
         available to an observer on GOES-18 after applying Earth, Moon, and Sun
         exclusion regions. It supports a NASA/JPL Horizons method, a local
-        TLE/SGP4 method, and a direct comparison of their visible-sky results.
+        TLE/SGP4 method, and a direct comparison of the GOES-18 ephemeris
+        directions derived from each method.
 
         The Earth clearance is measured 20° beyond the Earth limb, the Moon
         clearance is 20° from its center by default, and the selectable Sun

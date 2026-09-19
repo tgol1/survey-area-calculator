@@ -511,6 +511,31 @@ def compute_visible_sky(
     }
 
 
+def vector_right_ascension_declination(
+    vectors_km: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return ICRF/GCRS right ascension and declination in degrees."""
+    vectors = np.asarray(vectors_km, dtype=float)
+    if vectors.ndim != 2 or vectors.shape[1] != 3:
+        raise ValueError("Position vectors must have shape (samples, 3).")
+    if not np.all(np.isfinite(vectors)):
+        raise ValueError("Position vectors contain non-finite values.")
+    if np.any(np.linalg.norm(vectors, axis=1) == 0.0):
+        raise ValueError("Right ascension and declination require nonzero vectors.")
+
+    right_ascension = np.mod(
+        np.degrees(np.arctan2(vectors[:, 1], vectors[:, 0])),
+        360.0,
+    )
+    declination = np.degrees(
+        np.arctan2(
+            vectors[:, 2],
+            np.hypot(vectors[:, 0], vectors[:, 1]),
+        )
+    )
+    return right_ascension, declination
+
+
 def horizons_calendar_to_utc(calendar_date: str) -> datetime:
     """Parse a modern A.D. calendar label returned by Horizons."""
     value = calendar_date.removeprefix("A.D. ")
@@ -543,6 +568,8 @@ def write_results_csv(
             [
                 "utc",
                 "julian_date_ut",
+                "goes18_ra_deg",
+                "goes18_dec_deg",
                 "earth_distance_km",
                 "moon_distance_km",
                 "sun_distance_km",
@@ -569,6 +596,8 @@ def write_results_csv(
                 [
                     utc_isoformat(horizons_calendar_to_utc(calendar_dates[index])),
                     f"{jd:.9f}",
+                    f"{results['goes18_ra_deg'][index]:.12f}",
+                    f"{results['goes18_dec_deg'][index]:.12f}",
                     f"{results['earth_distance_km'][index]:.6f}",
                     f"{results['moon_distance_km'][index]:.6f}",
                     f"{results['sun_distance_km'][index]:.6f}",
@@ -1480,6 +1509,13 @@ def main() -> None:
         args.moon_reference,
         sun_exclusion,
     )
+    # Horizons returns Earth relative to GOES-18. Negating that vector gives
+    # GOES-18 relative to Earth's center in the same ICRF coordinate system.
+    goes18_ra_deg, goes18_dec_deg = vector_right_ascension_declination(
+        -earth_vectors
+    )
+    results["goes18_ra_deg"] = goes18_ra_deg
+    results["goes18_dec_deg"] = goes18_dec_deg
 
     angular_limits_deg = ANGULAR_FINE_LIMITS_DEG[sun_exclusion]
     selected_indices = adaptive_sample_indices(

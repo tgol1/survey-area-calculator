@@ -38,6 +38,13 @@ v3 - 12 September 2026
 - Script now highlights random two day section of visible sky data, showing finer scale
 - Added script that runs both algorithms and compares values, highlighting Gaussian width, center and computational error.
 
+v4 - 18 September 2026
+- Removed Gaussian reference from algorithm comparison
+- Angular difference in RA declination (in arc seconds) replaces y axis in lieu of direct comparison of visible sky fractions. Scripts have been updated to include RA declination in .csv file.
+- Updated "Algorithm Comparison" section of README to reflect changes in the algorithm comparison. 
+- Website reflects changes in algorithm comparison
+- Introduced trial function: two 2 week sections picked manually or at random are compared with each other and the differences are plotted. Utilizes JPL algorithm.
+
 ## Function
 Script computes the instantaneous visible fraction of sky from GOES-18 - a satellite positioned at 137W around Hawaii.
 
@@ -55,14 +62,14 @@ independently block portions of the sky. Likewise, maximum fractions of visible 
 
 ## Algorithm Comparison
 
-The compare_algorithms.py script compares the visible-sky results produced by the NASA/JPL Horizons and TLE/SGP4 algorithms. It runs both methods using the same date range, sampling interval, and Sun-exclusion angle, then matches their output values at common UTC timestamps.
+The compare_algorithms.py script compares the RA declination results produced by the NASA/JPL Horizons and TLE/SGP4 algorithms. It runs both methods using the same date range, sampling interval, and Sun-exclusion angle, then matches their output values at common UTC timestamps.
 
 The difference is calculated as:
 
 [
 \text{Difference} =
-\text{Horizons visible sky} -
-\text{TLE/SGP4 visible sky}
+\text{Horizons RA declination} -
+\text{TLE/SGP4 RA declination}
 ]
 
 The generated PNG contains two panels:
@@ -70,7 +77,7 @@ The generated PNG contains two panels:
 A time-domain dot plot showing how the difference between the two algorithms changes over time.
 A normalized histogram showing the distribution of those differences, with a Gaussian curve based on the sample mean and standard deviation.
 
-A mean difference near zero indicates little systematic bias between the algorithms. The standard deviation, (\sigma), describes the empirical spread of their visible-sky predictions and can be reported as the approximate one-standard-deviation computational disagreement. For example, (\sigma = 0.0072) percentage points means the two methods typically differ by approximately (0.0072) percentage points in calculated visible-sky coverage.
+A mean difference near zero indicates little systematic bias between the algorithms. The standard deviation, (\sigma), describes the empirical spread of RA declinations and can be reported as the approximate one-standard-deviation computational disagreement. For example, (\sigma = 0.0072) percentage points means the two methods typically differ by approximately (0.0072) percentage points in calculated visible-sky coverage.
 
 The histogram may not be perfectly Gaussian. Visible-sky plateaus can produce many differences close to zero, while orbital motion can create periodic or clustered residuals. Therefore, the Gaussian width should be interpreted as the spread of the visible-sky differences over the selected interval, rather than as a direct measurement of the satellite’s positional error in kilometers.
 

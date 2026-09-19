@@ -1,19 +1,15 @@
 #!/usr/bin/env python3
-"""Run and compare the GOES-18 Horizons and TLE/SGP4 algorithms.
+"""Compare GOES-18 positions from Horizons and TLE/SGP4 ephemerides.
 
 The program prompts once for a UTC start date, end date, and Sun exclusion
 angle. It then launches both existing visible-sky programs with the same
-settings and forces both CSV outputs to a uniform five-minute cadence.
+settings and forces both CSV outputs to a uniform five-minute cadence. Each
+source CSV supplies the geocentric right ascension and declination of GOES-18.
+The comparison converts those directions to unit vectors and calculates their
+great-circle angular separation in arcseconds.
 
-The signed computational difference is defined as:
-
-    Horizons visible sky (%) - TLE/SGP4 visible sky (%)
-
-One PNG is written beside this script. Its upper panel is a time-domain dot
-plot of the signed differences. Its lower panel is a probability-density
-histogram with a fitted Gaussian distribution. The reported Gaussian RMS
-computational error is sqrt(mu**2 + sigma**2), where mu is the mean bias and
-sigma is the population standard deviation of the differences.
+One PNG is written beside this script. Its upper panel shows angular separation
+versus time, and its lower panel is an ordinary histogram of those separations.
 
 Expected repository structure:
 
@@ -23,7 +19,7 @@ Expected repository structure:
     |-- tle_sgp4_algorithm/
     |   `-- goes18_visible_sky_tle.py
     `-- algorithm_comparison/
-        `-- compare_algorithms.py
+        `-- goes18_algorithm_comparison.py
 """
 
 from __future__ import annotations
@@ -56,35 +52,34 @@ MAX_HORIZONS_FIVE_MINUTE_SPAN = timedelta(days=34)
 REQUIRED_COLUMNS = {
     "utc",
     "sun_exclusion_radius_deg",
-    "visible_sky_percent",
+    "goes18_ra_deg",
+    "goes18_dec_deg",
 }
 
 
 @dataclass(frozen=True)
-class VisibilityData:
-    """Visible-sky percentages indexed by UTC timestamp."""
+class EphemerisData:
+    """GOES-18 geocentric right ascension and declination by timestamp."""
 
     label: str
     path: Path
-    values_by_time: dict[datetime, float]
+    directions_by_time: dict[datetime, tuple[float, float]]
     sun_angles_deg: np.ndarray
 
     @property
     def times(self) -> tuple[datetime, ...]:
-        return tuple(sorted(self.values_by_time))
+        return tuple(sorted(self.directions_by_time))
 
 
 @dataclass(frozen=True)
-class ErrorStatistics:
-    """Summary of the Horizons-minus-TLE differences."""
+class AngularSeparationStatistics:
+    """Empirical summary of the Horizons-to-TLE angular separations."""
 
-    mean_bias_pp: float
-    standard_deviation_pp: float
-    standard_error_pp: float
-    mean_absolute_error_pp: float
-    direct_rms_error_pp: float
-    gaussian_rms_error_pp: float
-    gaussian_fit_rmse_density: float
+    mean_arcsec: float
+    median_arcsec: float
+    rms_arcsec: float
+    percentile_95_arcsec: float
+    maximum_arcsec: float
 
 
 def parse_arguments() -> argparse.Namespace:
@@ -107,7 +102,7 @@ def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Run the Horizons and TLE/SGP4 GOES-18 algorithms and compare "
-            "their visible-sky percentages."
+            "their geocentric right ascension and declination."
         )
     )
     parser.add_argument(
@@ -317,10 +312,10 @@ def parse_utc(value: str) -> datetime:
     return timestamp.astimezone(UTC)
 
 
-def read_visibility_csv(path: Path, label: str) -> VisibilityData:
-    """Read UTC, Sun angle, and visible percentage from one source CSV."""
+def read_ephemeris_csv(path: Path, label: str) -> EphemerisData:
+    """Read UTC, Sun angle, and GOES-18 RA/Dec from one source CSV."""
     resolved = require_file(path, f"{label} result CSV")
-    values_by_time: dict[datetime, float] = {}
+    directions_by_time: dict[datetime, tuple[float, float]] = {}
     sun_angles: list[float] = []
 
     with resolved.open("r", newline="", encoding="utf-8-sig") as stream:
@@ -336,39 +331,47 @@ def read_visibility_csv(path: Path, label: str) -> VisibilityData:
         for line_number, row in enumerate(reader, start=2):
             try:
                 timestamp = parse_utc(row["utc"])
-                visible_percent = float(row["visible_sky_percent"])
+                right_ascension = float(row["goes18_ra_deg"])
+                declination = float(row["goes18_dec_deg"])
                 sun_angle = float(row["sun_exclusion_radius_deg"])
             except (TypeError, ValueError) as exc:
                 raise ValueError(
                     f"Invalid data in {resolved} on CSV line {line_number}."
                 ) from exc
 
-            if not math.isfinite(visible_percent) or not 0.0 <= visible_percent <= 100.0:
+            if not math.isfinite(right_ascension) or not (
+                0.0 <= right_ascension < 360.0
+            ):
                 raise ValueError(
-                    f"Invalid visible-sky percentage in {resolved} on line "
+                    f"Invalid GOES-18 right ascension in {resolved} on line "
+                    f"{line_number}."
+                )
+            if not math.isfinite(declination) or not -90.0 <= declination <= 90.0:
+                raise ValueError(
+                    f"Invalid GOES-18 declination in {resolved} on line "
                     f"{line_number}."
                 )
             if not math.isfinite(sun_angle):
                 raise ValueError(
                     f"Invalid Sun exclusion angle in {resolved} on line {line_number}."
                 )
-            if timestamp in values_by_time:
+            if timestamp in directions_by_time:
                 raise ValueError(f"Duplicate timestamp {timestamp} in {resolved}.")
 
-            values_by_time[timestamp] = visible_percent
+            directions_by_time[timestamp] = (right_ascension, declination)
             sun_angles.append(sun_angle)
 
-    if len(values_by_time) < 2:
+    if len(directions_by_time) < 2:
         raise ValueError(f"{resolved} contains fewer than two result rows.")
-    return VisibilityData(
+    return EphemerisData(
         label=label,
         path=resolved,
-        values_by_time=values_by_time,
+        directions_by_time=directions_by_time,
         sun_angles_deg=np.asarray(sun_angles, dtype=float),
     )
 
 
-def verify_sun_angle(data: VisibilityData, requested_angle: float) -> None:
+def verify_sun_angle(data: EphemerisData, requested_angle: float) -> None:
     """Require all source rows to use the requested Sun exclusion angle."""
     if np.allclose(
         data.sun_angles_deg,
@@ -393,13 +396,13 @@ def largest_time_step(times: tuple[datetime, ...]) -> timedelta:
 
 
 def align_results(
-    horizons: VisibilityData,
-    tle: VisibilityData,
+    horizons: EphemerisData,
+    tle: EphemerisData,
     require_uniform_five_minutes: bool,
 ) -> tuple[list[datetime], np.ndarray, np.ndarray]:
     """Align both result series using their exact common UTC timestamps."""
-    horizons_times = set(horizons.values_by_time)
-    tle_times = set(tle.values_by_time)
+    horizons_times = set(horizons.directions_by_time)
+    tle_times = set(tle.directions_by_time)
     common_times = sorted(horizons_times & tle_times)
     if len(common_times) < 2:
         raise ValueError("The two CSVs have fewer than two matching UTC timestamps.")
@@ -434,15 +437,15 @@ def align_results(
                     "uniformly time-weighted."
                 )
 
-    horizons_percent = np.asarray(
-        [horizons.values_by_time[timestamp] for timestamp in common_times],
+    horizons_radec = np.asarray(
+        [horizons.directions_by_time[timestamp] for timestamp in common_times],
         dtype=float,
     )
-    tle_percent = np.asarray(
-        [tle.values_by_time[timestamp] for timestamp in common_times],
+    tle_radec = np.asarray(
+        [tle.directions_by_time[timestamp] for timestamp in common_times],
         dtype=float,
     )
-    return common_times, horizons_percent, tle_percent
+    return common_times, horizons_radec, tle_radec
 
 
 def histogram_bin_edges(values: np.ndarray) -> np.ndarray:
@@ -464,68 +467,73 @@ def histogram_bin_edges(values: np.ndarray) -> np.ndarray:
     return np.linspace(value_min, value_max, bin_count + 1)
 
 
-def gaussian_density(
-    values: np.ndarray,
-    mean: float,
-    standard_deviation: float,
+def radec_to_unit_vectors(radec_deg: np.ndarray) -> np.ndarray:
+    """Convert an N-by-2 RA/Dec array in degrees to Cartesian unit vectors."""
+    coordinates = np.asarray(radec_deg, dtype=float)
+    if coordinates.ndim != 2 or coordinates.shape[1] != 2:
+        raise ValueError("RA/Dec coordinates must have shape (samples, 2).")
+    right_ascension = np.radians(coordinates[:, 0])
+    declination = np.radians(coordinates[:, 1])
+    cosine_declination = np.cos(declination)
+    return np.column_stack(
+        (
+            cosine_declination * np.cos(right_ascension),
+            cosine_declination * np.sin(right_ascension),
+            np.sin(declination),
+        )
+    )
+
+
+def angular_separation_arcseconds(
+    horizons_radec_deg: np.ndarray,
+    tle_radec_deg: np.ndarray,
 ) -> np.ndarray:
-    """Evaluate a normal probability density function."""
-    exponent = -0.5 * np.square((values - mean) / standard_deviation)
-    return np.exp(exponent) / (standard_deviation * math.sqrt(2.0 * math.pi))
+    """Return stable great-circle separations between paired RA/Dec samples."""
+    horizons_unit = radec_to_unit_vectors(horizons_radec_deg)
+    tle_unit = radec_to_unit_vectors(tle_radec_deg)
+    if horizons_unit.shape != tle_unit.shape:
+        raise ValueError("Horizons and TLE RA/Dec arrays have different shapes.")
+
+    cross_magnitude = np.linalg.norm(
+        np.cross(horizons_unit, tle_unit),
+        axis=1,
+    )
+    dot_product = np.clip(
+        np.einsum("ij,ij->i", horizons_unit, tle_unit),
+        -1.0,
+        1.0,
+    )
+    separation_radians = np.arctan2(cross_magnitude, dot_product)
+    return np.degrees(separation_radians) * 3600.0
 
 
 def calculate_statistics(
-    differences: np.ndarray,
-    bin_edges: np.ndarray,
-) -> ErrorStatistics:
-    """Calculate algorithm-difference and Gaussian-fit error statistics."""
-    mean_bias = float(np.mean(differences))
-    standard_deviation = float(np.std(differences, ddof=0))
-    standard_error = standard_deviation / math.sqrt(len(differences))
-    mean_absolute_error = float(np.mean(np.abs(differences)))
-    direct_rms_error = float(np.sqrt(np.mean(np.square(differences))))
-    gaussian_rms_error = math.hypot(mean_bias, standard_deviation)
-
-    if standard_deviation > 1.0e-12:
-        observed_density, _ = np.histogram(
-            differences,
-            bins=bin_edges,
-            density=True,
-        )
-        bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
-        fitted_density = gaussian_density(
-            bin_centers,
-            mean_bias,
-            standard_deviation,
-        )
-        fit_rmse = float(
-            np.sqrt(np.mean(np.square(observed_density - fitted_density)))
-        )
-    else:
-        fit_rmse = 0.0
-
-    return ErrorStatistics(
-        mean_bias_pp=mean_bias,
-        standard_deviation_pp=standard_deviation,
-        standard_error_pp=standard_error,
-        mean_absolute_error_pp=mean_absolute_error,
-        direct_rms_error_pp=direct_rms_error,
-        gaussian_rms_error_pp=gaussian_rms_error,
-        gaussian_fit_rmse_density=fit_rmse,
+    separations_arcsec: np.ndarray,
+) -> AngularSeparationStatistics:
+    """Calculate empirical angular-separation summary statistics."""
+    return AngularSeparationStatistics(
+        mean_arcsec=float(np.mean(separations_arcsec)),
+        median_arcsec=float(np.median(separations_arcsec)),
+        rms_arcsec=float(np.sqrt(np.mean(np.square(separations_arcsec)))),
+        percentile_95_arcsec=float(np.percentile(separations_arcsec, 95.0)),
+        maximum_arcsec=float(np.max(separations_arcsec)),
     )
 
 
 def write_comparison_plot(
     path: Path,
     times: list[datetime],
-    horizons_percent: np.ndarray,
-    tle_percent: np.ndarray,
+    horizons_radec_deg: np.ndarray,
+    tle_radec_deg: np.ndarray,
     sun_exclusion: float,
-) -> ErrorStatistics:
-    """Write the time-domain dot plot and Gaussian-highlighted histogram."""
-    differences = horizons_percent - tle_percent
-    bin_edges = histogram_bin_edges(differences)
-    statistics = calculate_statistics(differences, bin_edges)
+) -> AngularSeparationStatistics:
+    """Write time-domain and histogram views of angular separation."""
+    separations_arcsec = angular_separation_arcseconds(
+        horizons_radec_deg,
+        tle_radec_deg,
+    )
+    bin_edges = histogram_bin_edges(separations_arcsec)
+    statistics = calculate_statistics(separations_arcsec)
 
     figure, (time_axis, histogram_axis) = plt.subplots(
         2,
@@ -535,40 +543,38 @@ def write_comparison_plot(
         constrained_layout=True,
     )
     dot_color = "#176B87"
-    gaussian_color = "#D97706"
+    reference_color = "#D97706"
 
-    time_axis.axhline(0.0, color="#475569", linewidth=0.9, zorder=1)
-    if statistics.standard_deviation_pp > 0.0:
-        time_axis.axhspan(
-            statistics.mean_bias_pp - statistics.standard_deviation_pp,
-            statistics.mean_bias_pp + statistics.standard_deviation_pp,
-            color=gaussian_color,
-            alpha=0.13,
-            label="Gaussian mean +/- 1 standard deviation",
-            zorder=0,
-        )
+    time_axis.plot(
+        times,
+        separations_arcsec,
+        color=dot_color,
+        linewidth=1.0,
+        alpha=0.82,
+        zorder=1,
+    )
     time_axis.scatter(
         times,
-        differences,
-        s=9,
+        separations_arcsec,
+        s=7,
         color=dot_color,
-        alpha=0.62,
+        alpha=0.55,
         linewidths=0.0,
-        label="Horizons - TLE/SGP4",
+        label="Great-circle position separation",
         zorder=2,
     )
     time_axis.axhline(
-        statistics.mean_bias_pp,
-        color=gaussian_color,
-        linewidth=1.5,
+        statistics.mean_arcsec,
+        color=reference_color,
+        linewidth=1.3,
         linestyle="--",
-        label=f"Gaussian mean bias = {statistics.mean_bias_pp:+.5f} pp",
+        label=f"Mean = {statistics.mean_arcsec:.3f} arcsec",
         zorder=3,
     )
-    time_axis.set_ylabel("Difference (percentage points)")
+    time_axis.set_ylabel("Angular separation (arcsec)")
     time_axis.set_xlabel("Time (UTC)")
     time_axis.set_title(
-        "Time-domain computational differences",
+        "GOES-18 position difference over time",
         loc="left",
         fontsize=11.5,
         weight="bold",
@@ -579,81 +585,29 @@ def write_comparison_plot(
     locator = mdates.AutoDateLocator(minticks=5, maxticks=10, tz=UTC)
     time_axis.xaxis.set_major_locator(locator)
     time_axis.xaxis.set_major_formatter(mdates.ConciseDateFormatter(locator, tz=UTC))
+    time_axis.set_ylim(bottom=0.0)
     time_axis.legend(loc="best", frameon=True, fontsize=8.5)
 
     histogram_axis.hist(
-        differences,
+        separations_arcsec,
         bins=bin_edges,
-        density=True,
         color=dot_color,
-        alpha=0.58,
+        alpha=0.65,
         edgecolor="white",
         linewidth=0.7,
-        label="Difference histogram",
+        label="Angular-separation samples",
     )
-    if statistics.standard_deviation_pp > 1.0e-12:
-        gaussian_min = min(
-            float(bin_edges[0]),
-            statistics.mean_bias_pp - 4.0 * statistics.standard_deviation_pp,
-        )
-        gaussian_max = max(
-            float(bin_edges[-1]),
-            statistics.mean_bias_pp + 4.0 * statistics.standard_deviation_pp,
-        )
-        gaussian_x = np.linspace(gaussian_min, gaussian_max, 600)
-        gaussian_y = gaussian_density(
-            gaussian_x,
-            statistics.mean_bias_pp,
-            statistics.standard_deviation_pp,
-        )
-        histogram_axis.plot(
-            gaussian_x,
-            gaussian_y,
-            color=gaussian_color,
-            linewidth=2.2,
-            label="Fitted Gaussian",
-        )
-        histogram_axis.fill_between(
-            gaussian_x,
-            0.0,
-            gaussian_y,
-            color=gaussian_color,
-            alpha=0.12,
-        )
-        within_one_sigma = (
-            np.abs(gaussian_x - statistics.mean_bias_pp)
-            <= statistics.standard_deviation_pp
-        )
-        histogram_axis.fill_between(
-            gaussian_x,
-            0.0,
-            gaussian_y,
-            where=within_one_sigma,
-            color=gaussian_color,
-            alpha=0.25,
-            interpolate=True,
-            label="Gaussian central 1-sigma region",
-        )
-    else:
-        histogram_axis.axvline(
-            statistics.mean_bias_pp,
-            color=gaussian_color,
-            linewidth=2.2,
-            label="Degenerate Gaussian (sigma = 0)",
-        )
-
     histogram_axis.axvline(
-        statistics.mean_bias_pp,
-        color=gaussian_color,
+        statistics.mean_arcsec,
+        color=reference_color,
         linewidth=1.2,
         linestyle="--",
+        label=f"Mean = {statistics.mean_arcsec:.3f} arcsec",
     )
-    histogram_axis.set_xlabel(
-        "Horizons - TLE/SGP4 visible sky (percentage points)"
-    )
-    histogram_axis.set_ylabel("Probability density (1/pp)")
+    histogram_axis.set_xlabel("Great-circle angular separation (arcsec)")
+    histogram_axis.set_ylabel("Sample count")
     histogram_axis.set_title(
-        "Difference distribution with Gaussian fit",
+        "Distribution of GOES-18 position differences",
         loc="left",
         fontsize=11.5,
         weight="bold",
@@ -663,15 +617,12 @@ def write_comparison_plot(
     histogram_axis.legend(loc="best", frameon=True, fontsize=8.5)
 
     statistics_text = (
-        f"Samples: {len(differences):,}\n"
-        f"Mean bias, mu: {statistics.mean_bias_pp:+.6f} pp\n"
-        f"Gaussian spread, sigma: {statistics.standard_deviation_pp:.6f} pp\n"
-        f"Standard error of mu: {statistics.standard_error_pp:.6f} pp\n"
-        f"Mean absolute error: {statistics.mean_absolute_error_pp:.6f} pp\n"
-        f"Gaussian RMS computational error: "
-        f"{statistics.gaussian_rms_error_pp:.6f} pp\n"
-        f"Gaussian-fit density RMSE: "
-        f"{statistics.gaussian_fit_rmse_density:.6f} 1/pp"
+        f"Samples: {len(separations_arcsec):,}\n"
+        f"Mean: {statistics.mean_arcsec:.6f} arcsec\n"
+        f"Median: {statistics.median_arcsec:.6f} arcsec\n"
+        f"RMS: {statistics.rms_arcsec:.6f} arcsec\n"
+        f"95th percentile: {statistics.percentile_95_arcsec:.6f} arcsec\n"
+        f"Maximum: {statistics.maximum_arcsec:.6f} arcsec"
     )
     histogram_axis.text(
         0.995,
@@ -690,10 +641,9 @@ def write_comparison_plot(
     )
 
     figure.suptitle(
-        "GOES-18 visible-sky algorithm comparison\n"
-        f"JPL Horizons minus TLE/SGP4 | {times[0]:%Y-%m-%d %H:%M} to "
-        f"{times[-1]:%Y-%m-%d %H:%M} UTC | Sun exclusion: "
-        f"{sun_exclusion:g} degrees",
+        "GOES-18 ephemeris algorithm comparison\n"
+        "Great-circle separation from geocentric ICRF/GCRS RA and Dec | "
+        f"{times[0]:%Y-%m-%d %H:%M} to {times[-1]:%Y-%m-%d %H:%M} UTC",
         x=0.07,
         ha="left",
         fontsize=14,
@@ -719,11 +669,11 @@ def main() -> int:
         else:
             print("Skipping source algorithm runs; reading existing CSV files.")
 
-        horizons = read_visibility_csv(args.horizons_csv, "JPL Horizons")
-        tle = read_visibility_csv(args.tle_csv, "TLE/SGP4")
+        horizons = read_ephemeris_csv(args.horizons_csv, "JPL Horizons")
+        tle = read_ephemeris_csv(args.tle_csv, "TLE/SGP4")
         verify_sun_angle(horizons, sun_exclusion)
         verify_sun_angle(tle, sun_exclusion)
-        times, horizons_percent, tle_percent = align_results(
+        times, horizons_radec, tle_radec = align_results(
             horizons,
             tle,
             require_uniform_five_minutes=not args.skip_run,
@@ -731,8 +681,8 @@ def main() -> int:
         statistics = write_comparison_plot(
             args.output,
             times,
-            horizons_percent,
-            tle_percent,
+            horizons_radec,
+            tle_radec,
             sun_exclusion,
         )
     except (FileNotFoundError, OSError, RuntimeError, ValueError) as exc:
@@ -744,23 +694,23 @@ def main() -> int:
         output = output.with_suffix(".png")
     print("\nAlgorithm comparison complete")
     print(f"Matched samples: {len(times):,}")
-    print("Difference definition: Horizons - TLE/SGP4")
-    print(f"Mean bias: {statistics.mean_bias_pp:+.9f} percentage points")
     print(
-        "Gaussian standard deviation: "
-        f"{statistics.standard_deviation_pp:.9f} percentage points"
+        "Difference definition: great-circle separation between the "
+        "JPL Horizons and TLE/SGP4 GOES-18 RA/Dec directions"
+    )
+    print(f"Mean angular separation: {statistics.mean_arcsec:.9f} arcsec")
+    print(
+        f"Median angular separation: {statistics.median_arcsec:.9f} arcsec"
     )
     print(
-        "Gaussian RMS computational error, sqrt(mu^2 + sigma^2): "
-        f"{statistics.gaussian_rms_error_pp:.9f} percentage points"
+        f"RMS angular separation: {statistics.rms_arcsec:.9f} arcsec"
     )
     print(
-        "Direct RMS difference check: "
-        f"{statistics.direct_rms_error_pp:.9f} percentage points"
+        "95th-percentile angular separation: "
+        f"{statistics.percentile_95_arcsec:.9f} arcsec"
     )
     print(
-        "Gaussian-fit density RMSE: "
-        f"{statistics.gaussian_fit_rmse_density:.9f} 1/percentage-point"
+        f"Maximum angular separation: {statistics.maximum_arcsec:.9f} arcsec"
     )
     print(f"Wrote comparison PNG: {output}")
     return 0
