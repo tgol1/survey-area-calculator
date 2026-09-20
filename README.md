@@ -47,6 +47,7 @@ v4 - 18 September 2026
 
 v4.1 - 20 September 2026
 - Added Aitoff-Mollweide projections to webstie
+- Added background to website
 
 ## Function
 Script computes the instantaneous visible fraction of sky from GOES-18 - a satellite positioned at 137W around Hawaii.

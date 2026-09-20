@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import base64
 import csv
 from datetime import date, timedelta
 import io
@@ -16,6 +17,7 @@ import streamlit as st
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 README_PATH = PROJECT_ROOT / "README.md"
+BACKGROUND_PATH = PROJECT_ROOT / "assets" / "background.png"
 HORIZONS_SCRIPT = (
     PROJECT_ROOT / "horizons_api_algorithm" / "goes18_visible_sky.py"
 )
@@ -56,6 +58,48 @@ st.set_page_config(
     page_icon="🛰️",
     layout="wide",
 )
+
+
+def set_background(image_path: Path) -> None:
+    """Apply a local PNG as the Streamlit page background."""
+    if not image_path.is_file():
+        st.warning(
+            "The background image was not found. Add "
+            "`assets/background.png` to the deployed repository branch."
+        )
+        return
+
+    encoded_image = base64.b64encode(image_path.read_bytes()).decode("utf-8")
+    st.markdown(
+        f"""
+        <style>
+        [data-testid="stAppViewContainer"] {{
+            background-image:
+                linear-gradient(
+                    rgba(255, 255, 255, 0.82),
+                    rgba(255, 255, 255, 0.82)
+                ),
+                url("data:image/png;base64,{encoded_image}");
+            background-size: cover;
+            background-position: center;
+            background-repeat: no-repeat;
+            background-attachment: fixed;
+        }}
+
+        [data-testid="stHeader"] {{
+            background-color: rgba(255, 255, 255, 0.70);
+        }}
+
+        [data-testid="stToolbar"] {{
+            background-color: transparent;
+        }}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+set_background(BACKGROUND_PATH)
 
 
 def normalize_date_range(selected_dates: object) -> tuple[date, date] | None:
