@@ -385,25 +385,36 @@ def nearest_tle_indices(times: Time, satellites: list[Satrec]) -> np.ndarray:
     return np.argmin(distances, axis=1).astype(int)
 
 
-def warn_if_tle_is_stale(
+def enforce_tle_age_limit(
     times: Time,
     satellites: list[Satrec],
     selected_tle_indices: np.ndarray,
     max_age_days: float,
+    tle_source: str,
+    allow_stale_tle: bool,
 ) -> float:
-    """Warn when samples are far from their nearest available TLE epochs."""
+    """Reject stale propagation unless the user explicitly accepts it."""
     epochs_jd = np.asarray([tle_epoch_jd(item) for item in satellites])
     selected_epochs = epochs_jd[selected_tle_indices]
     age_days = np.abs(np.asarray(times.utc.jd) - selected_epochs)
     maximum_age = float(np.max(age_days))
     if maximum_age > max_age_days:
+        message = (
+            "No sufficiently date-matched GOES-18 TLE is available. The "
+            f"farthest requested sample is {maximum_age:.1f} days from its "
+            f"nearest TLE epoch, exceeding the {max_age_days:g}-day limit.\n"
+            f"Selected TLE source: {tle_source}\n"
+            "Historical calculations require Space-Track GP_HISTORY data. "
+            f"Set {SPACE_TRACK_IDENTITY_ENV} and {SPACE_TRACK_PASSWORD_ENV}, "
+            "or provide a historical file with --tle-file. The script is "
+            "stopping instead of producing a misleading JPL comparison."
+        )
+        if not allow_stale_tle:
+            raise SystemExit(message)
         warnings.warn(
-            "At least one requested sample is "
-            f"{maximum_age:.1f} days from its nearest available TLE epoch. "
-            "TLE/SGP4 accuracy "
-            "degrades away from the epoch and across station-keeping "
-            "maneuvers. Configure Space-Track GP_HISTORY credentials or use "
-            "a local historical TLE file covering the requested dates.",
+            message
+            + " Stale propagation was explicitly enabled with "
+            "--allow-stale-tle, so the resulting positions may be inaccurate.",
             RuntimeWarning,
             stacklevel=2,
         )
@@ -644,8 +655,16 @@ def parse_arguments() -> argparse.Namespace:
         type=float,
         default=DEFAULT_MAX_TLE_AGE_DAYS,
         help=(
-            "Warn when a requested time is more than this many days from the "
-            "TLE epoch (default: 14)"
+            "Reject a requested time more than this many days from its nearest "
+            "TLE epoch unless --allow-stale-tle is set (default: 14)"
+        ),
+    )
+    parser.add_argument(
+        "--allow-stale-tle",
+        action="store_true",
+        help=(
+            "Allow propagation beyond --max-tle-age. This is intended only "
+            "for diagnostics and can produce inaccurate comparisons."
         ),
     )
     parser.add_argument(
@@ -732,11 +751,13 @@ def main() -> None:
     datetimes = build_sample_datetimes(start, stop)
     astropy_times = Time(datetimes, scale="utc")
     selected_tle_indices = nearest_tle_indices(astropy_times, satellites)
-    maximum_tle_age = warn_if_tle_is_stale(
+    maximum_tle_age = enforce_tle_age_limit(
         astropy_times,
         satellites,
         selected_tle_indices,
         args.max_tle_age,
+        tle_source,
+        args.allow_stale_tle,
     )
 
     print(
