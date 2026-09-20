@@ -4,14 +4,13 @@
 from __future__ import annotations
 
 import csv
-from datetime import date, time, timedelta
+from datetime import date, timedelta
 import io
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
 
-from PIL import Image
 import streamlit as st
 
 
@@ -33,10 +32,10 @@ DAILY_VARIATION_SCRIPT = (
     / "twoweektrial_comparison"
     / "goes18_twoweektrialcomparison.py"
 )
-SKY_PROJECTION_SCRIPT = (
+COMBINED_PROJECTION_PATH = (
     PROJECT_ROOT
     / "sky_projection"
-    / "goes18_visible_sky_projection.py"
+    / "goes18_aitoff_mollweide_projection.png"
 )
 TLE_FILE = (
     PROJECT_ROOT / "tle_sgp4_algorithm" / "goes18_2026-08-27.tle"
@@ -50,12 +49,6 @@ DEFAULT_DAILY_WINDOW_1 = (date(2026, 1, 1), date(2026, 1, 15))
 DEFAULT_DAILY_WINDOW_2 = (date(2026, 8, 1), date(2026, 8, 15))
 DEFAULT_RANDOM_POOL = (date(2026, 1, 1), date(2027, 1, 1))
 DAILY_WINDOW_DAYS = 14
-DEFAULT_PROJECTION_SCENARIOS = (
-    (date(2026, 1, 3), time(0, 0), 30),
-    (date(2026, 1, 10), time(6, 0), 45),
-    (date(2026, 1, 18), time(12, 0), 30),
-    (date(2026, 1, 26), time(18, 0), 45),
-)
 
 
 st.set_page_config(
@@ -194,37 +187,6 @@ def run_command(command: list[str], timeout_seconds: int = 1_200) -> tuple[int, 
 def read_file_bytes(path: Path) -> bytes | None:
     """Read an output before its temporary directory is removed."""
     return path.read_bytes() if path.is_file() else None
-
-
-def combine_projection_images(
-    aitoff_bytes: bytes | None,
-    mollweide_bytes: bytes | None,
-) -> bytes | None:
-    """Stack the two projection PNGs into one downloadable image."""
-    if not aitoff_bytes or not mollweide_bytes:
-        return None
-
-    with Image.open(io.BytesIO(aitoff_bytes)) as aitoff_source:
-        aitoff = aitoff_source.convert("RGB")
-    with Image.open(io.BytesIO(mollweide_bytes)) as mollweide_source:
-        mollweide = mollweide_source.convert("RGB")
-
-    gap_pixels = 40
-    output_width = max(aitoff.width, mollweide.width)
-    output_height = aitoff.height + gap_pixels + mollweide.height
-    combined = Image.new("RGB", (output_width, output_height), "white")
-    combined.paste(aitoff, ((output_width - aitoff.width) // 2, 0))
-    combined.paste(
-        mollweide,
-        (
-            (output_width - mollweide.width) // 2,
-            aitoff.height + gap_pixels,
-        ),
-    )
-
-    output = io.BytesIO()
-    combined.save(output, format="PNG", optimize=True)
-    return output.getvalue()
 
 
 def visible_sky_statistics(csv_bytes: bytes | None) -> dict[str, float | int]:
@@ -570,89 +532,6 @@ def run_daily_variation(
         )
 
 
-def run_sky_projections(
-    scenarios: list[tuple[date, time, int]],
-) -> None:
-    """Generate Aitoff and Mollweide maps and combine them into one PNG."""
-    if not required_files_exist([SKY_PROJECTION_SCRIPT, HORIZONS_SCRIPT]):
-        return
-
-    with tempfile.TemporaryDirectory(prefix="goes18-sky-projection-") as directory:
-        prefix = Path(directory) / "goes18_visible_sky_projection_examples"
-        command = [
-            sys.executable,
-            str(SKY_PROJECTION_SCRIPT),
-            "--projection",
-            "both",
-            "--output-prefix",
-            str(prefix),
-        ]
-        for scenario_date, scenario_time, sun_angle in scenarios:
-            command.extend(
-                [
-                    "--scenario",
-                    (
-                        f"{scenario_date.isoformat()}T"
-                        f"{scenario_time.strftime('%H:%M')},{sun_angle}"
-                    ),
-                ]
-            )
-
-        with st.spinner(
-            "Downloading Earth, Moon, and Sun vectors and generating both projections..."
-        ):
-            return_code, log = run_command(command)
-
-        aitoff_path = prefix.parent / f"{prefix.name}_aitoff.png"
-        mollweide_path = prefix.parent / f"{prefix.name}_mollweide.png"
-        csv_path = prefix.with_suffix(".csv")
-        aitoff_bytes = read_file_bytes(aitoff_path)
-        mollweide_bytes = read_file_bytes(mollweide_path)
-        combined_bytes = (
-            combine_projection_images(aitoff_bytes, mollweide_bytes)
-            if return_code == 0
-            else None
-        )
-
-        save_result(
-            "projection_result",
-            return_code,
-            log,
-            images={
-                "combined": (
-                    combined_bytes,
-                    (
-                        "GOES-18 observer-centered all-sky maps. The Aitoff "
-                        "examples are shown first and the equal-area "
-                        "Mollweide examples are shown below."
-                    ),
-                ),
-            },
-            downloads={
-                "combined": (
-                    combined_bytes,
-                    "goes18_aitoff_mollweide_projection.png",
-                    "image/png",
-                ),
-                "aitoff": (
-                    aitoff_bytes,
-                    "goes18_visible_sky_projection_aitoff.png",
-                    "image/png",
-                ),
-                "mollweide": (
-                    mollweide_bytes,
-                    "goes18_visible_sky_projection_mollweide.png",
-                    "image/png",
-                ),
-                "csv": (
-                    read_file_bytes(csv_path),
-                    "goes18_visible_sky_projection_scenarios.csv",
-                    "text/csv",
-                ),
-            },
-        )
-
-
 st.title("GOES-18 Visible-Sky Calculator")
 st.caption(
     "Interactive Earth, Moon, and Sun avoidance analysis for GOES-18 near 137°W"
@@ -675,7 +554,10 @@ with st.expander("About", expanded=True):
     )
 
 
-with st.expander("README.md"):
+reference_tabs = st.tabs(["README.md", "Sky projection guide"])
+
+
+with reference_tabs[0]:
     if README_PATH.is_file():
         st.markdown(README_PATH.read_text(encoding="utf-8"))
     else:
@@ -685,13 +567,92 @@ with st.expander("README.md"):
         )
 
 
+with reference_tabs[1]:
+    st.markdown("### GOES-18 Aitoff–Mollweide visible-sky projection")
+    st.markdown(
+        "This figure shows four example instants from the point of view of "
+        "GOES-18, using both Aitoff and Mollweide projections of the same "
+        "satellite-centered celestial sphere."
+    )
+
+    if COMBINED_PROJECTION_PATH.is_file():
+        projection_bytes = COMBINED_PROJECTION_PATH.read_bytes()
+        st.image(
+            projection_bytes,
+            caption=(
+                "Earth, Moon, and Sun exclusion regions as viewed from "
+                "GOES-18. Aitoff examples are shown first and Mollweide "
+                "examples are shown below."
+            ),
+            use_container_width=True,
+        )
+        st.download_button(
+            "Download projection PNG",
+            data=projection_bytes,
+            file_name="goes18_aitoff_mollweide_projection.png",
+            mime="image/png",
+            key="download_static_projection",
+        )
+    else:
+        st.error(
+            "The projection image was not found. Add "
+            "`sky_projection/goes18_aitoff_mollweide_projection.png` "
+            "to the deployed repository branch."
+        )
+
+    st.markdown(
+        """
+        #### How to read the figure
+
+        - **Unshaded sky** is available for observation. **Blue**, **gray**,
+          and **orange** represent the Earth, Moon, and Sun exclusion regions.
+          Blended colors show overlapping exclusion regions; overlap is counted
+          only once when calculating the visible fraction.
+        - The **dark-blue inner disk** is Earth's apparent physical disk. The
+          larger translucent blue cap includes the required 20° clearance
+          beyond Earth's limb. The Moon and Sun center markers are schematic
+          because their physical disks are less than one degree across, while
+          their avoidance regions are much larger.
+        - Each panel title gives the UTC instant, selected Sun exclusion angle,
+          Earth exclusion radius, and resulting visible-sky percentage.
+        - Right ascension is labeled in hours and increases toward the left,
+          following astronomical sky-map convention. The two horizontal edges
+          meet at the same celestial seam, so a cap shown on both edges is one
+          continuous region.
+
+        #### The satellite's point of view
+
+        Imagine GOES-18 at the center of a transparent sphere, looking outward
+        in every direction. The map is the inside surface of that celestial
+        sphere flattened into two dimensions. GOES-18 is therefore not shown
+        as a point—it is the observer at the origin. The Earth, Moon, and Sun
+        markers indicate the directions in which those bodies appear from the
+        spacecraft.
+
+        GOES-18 remains near its geostationary longitude, but its position and
+        the Earth-pointing direction rotate in an inertial celestial frame.
+        Meanwhile, the Moon and Sun directions change with time. These changes
+        move the exclusion caps and alter how much they overlap, producing the
+        different visible-sky percentages shown in the four examples.
+
+        #### Why show both projections?
+
+        The **Aitoff projection** provides a familiar whole-sky view with a
+        useful balance of shape and scale. The **Mollweide projection is
+        equal-area**, so the relative shaded areas more directly represent
+        excluded solid angle. Both flatten a sphere, so exclusion caps can look
+        stretched near the outer edges even though their true angular radii do
+        not change.
+        """
+    )
+
+
 method_tabs = st.tabs(
     [
         "JPL Horizons",
         "TLE/SGP4",
         "Algorithm comparison",
         "Two-week daily variation",
-        "Aitoff–Mollweide sky maps",
     ]
 )
 
@@ -891,96 +852,3 @@ with method_tabs[3]:
                     random_pool=random_pool,
                 )
     render_result("daily_variation_result")
-
-
-with method_tabs[4]:
-    st.markdown(
-        "Generate paired **Aitoff and Mollweide all-sky maps** for four "
-        "user-selected UTC instants. Each map uses JPL Horizons vectors with "
-        "GOES-18 as the observing center. The two map types are combined into "
-        "one PNG, while the individual projections and plotted coordinates "
-        "remain available as downloads."
-    )
-
-    with st.expander("How to read the sky maps", expanded=True):
-        st.markdown(
-            """
-            - **Unshaded sky** is available for observation. Blue, gray, and
-              orange show the Earth, Moon, and Sun exclusion regions,
-              respectively. Overlapping colors indicate that two or more
-              avoidance regions cover the same directions; the overlap is
-              counted only once in the visible-sky calculation.
-            - The **dark-blue inner disk** is the Earth's apparent physical
-              disk. Its larger translucent blue region includes the required
-              20° clearance beyond the Earth limb. The Moon and Sun are less
-              than one degree across, so their plotted center markers are
-              schematic; their much larger avoidance regions are drawn to
-              their calculated angular radii.
-            - The map is drawn from the **satellite's point of view**. Imagine
-              GOES-18 at the center of a transparent celestial sphere, looking
-              outward in every possible direction. GOES-18 is therefore not
-              drawn as an object on the map—it is the observer at the origin.
-              Each point represents a line of sight from the satellite, and
-              the Earth, Moon, and Sun markers show where those bodies appear
-              in the satellite-centered sky.
-            - Changing the UTC instant changes GOES-18's inertial position and
-              the apparent Moon and Sun directions, even though the satellite
-              remains near its geostationary longitude. This moves and changes
-              the overlap of the exclusion regions.
-            - Right ascension is labeled in hours and **increases toward the
-              left**, following astronomical sky-map convention. The left and
-              right edges are the same celestial seam, so a cap split across
-              both edges is one continuous region on the sphere.
-            - The **Aitoff projection** provides a familiar whole-sky view with
-              moderate shape distortion. The **Mollweide projection is
-              equal-area**, so the relative shaded areas more directly
-              represent excluded solid angle. Both flatten a sphere, so cap
-              outlines can appear stretched near the map edges.
-            """
-        )
-
-    st.info(
-        "Four scenarios require twelve Horizons vector requests: Earth, Moon, "
-        "and Sun for each instant. Generation can therefore take about one or "
-        "two minutes."
-    )
-
-    with st.form("sky_projection_form"):
-        projection_scenarios: list[tuple[date, time, int]] = []
-        for index, (default_date, default_time, default_angle) in enumerate(
-            DEFAULT_PROJECTION_SCENARIOS,
-            start=1,
-        ):
-            st.markdown(f"#### Scenario {index}")
-            scenario_columns = st.columns((1.2, 1.0, 0.9))
-            scenario_date = scenario_columns[0].date_input(
-                "UTC date",
-                value=default_date,
-                format="YYYY-MM-DD",
-                key=f"projection_date_{index}",
-            )
-            scenario_time = scenario_columns[1].time_input(
-                "UTC time",
-                value=default_time,
-                step=3_600,
-                key=f"projection_time_{index}",
-            )
-            scenario_angle = scenario_columns[2].selectbox(
-                "Sun exclusion angle",
-                options=(30, 45),
-                index=0 if default_angle == 30 else 1,
-                format_func=lambda angle: f"{angle}°",
-                key=f"projection_sun_angle_{index}",
-            )
-            projection_scenarios.append(
-                (scenario_date, scenario_time, scenario_angle)
-            )
-
-        projection_submit = st.form_submit_button(
-            "Generate combined Aitoff–Mollweide projection",
-            type="primary",
-        )
-
-    if projection_submit:
-        run_sky_projections(projection_scenarios)
-    render_result("projection_result")
