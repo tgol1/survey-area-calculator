@@ -71,22 +71,64 @@ def set_background(image_path: Path) -> None:
         [data-testid="stAppViewContainer"] {{
             background-image:
                 linear-gradient(
-                    rgba(255, 255, 255, 0.82),
-                    rgba(255, 255, 255, 0.82)
+                    rgba(2, 6, 23, 0.34),
+                    rgba(2, 6, 23, 0.56)
                 ),
                 url("data:image/png;base64,{encoded_image}");
             background-size: cover;
             background-position: center;
             background-repeat: no-repeat;
             background-attachment: fixed;
+            color: #f8fafc;
         }}
 
         [data-testid="stHeader"] {{
-            background-color: rgba(255, 255, 255, 0.70);
+            background-color: rgba(2, 6, 23, 0.72);
         }}
 
         [data-testid="stToolbar"] {{
             background-color: transparent;
+        }}
+
+        [data-testid="stAppViewContainer"] h1,
+        [data-testid="stAppViewContainer"] h2,
+        [data-testid="stAppViewContainer"] h3,
+        [data-testid="stAppViewContainer"] h4,
+        [data-testid="stAppViewContainer"] .stMarkdown p,
+        [data-testid="stAppViewContainer"] .stMarkdown li,
+        [data-testid="stWidgetLabel"] p {{
+            color: #f8fafc;
+            text-shadow: 0 1px 3px rgba(0, 0, 0, 0.75);
+        }}
+
+        [data-testid="stForm"],
+        [data-testid="stExpander"] {{
+            background-color: rgba(15, 23, 42, 0.76);
+            border: 1px solid rgba(255, 255, 255, 0.22);
+            border-radius: 12px;
+            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.22);
+            backdrop-filter: blur(5px);
+        }}
+
+        [data-testid="stForm"] {{
+            padding: 1rem;
+        }}
+
+        [data-testid="stExpander"] details summary p {{
+            color: #f8fafc;
+            font-weight: 600;
+        }}
+
+        [data-testid="stMetric"] {{
+            background-color: rgba(15, 23, 42, 0.78);
+            border: 1px solid rgba(255, 255, 255, 0.18);
+            border-radius: 10px;
+            padding: 0.75rem;
+        }}
+
+        [data-testid="stMetric"] label,
+        [data-testid="stMetricValue"] {{
+            color: #f8fafc;
         }}
 
         .stTabs [data-baseweb="tab-list"] {{
