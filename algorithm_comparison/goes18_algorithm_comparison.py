@@ -156,7 +156,16 @@ def parse_arguments() -> argparse.Namespace:
         type=Path,
         help=(
             "Optional saved GOES-18 TLE passed to the TLE algorithm; when "
-            "omitted, that script uses its online-download/fallback behavior"
+            "omitted, that script selects online TLE data by requested date"
+        ),
+    )
+    parser.add_argument(
+        "--tle-source",
+        choices=("auto", "space-track", "celestrak"),
+        default="auto",
+        help=(
+            "Online source passed to the TLE algorithm when --tle-file is "
+            "omitted (default: auto)"
         ),
     )
     parser.add_argument(
@@ -295,6 +304,8 @@ def run_source_algorithms(
     ]
     if args.tle_file is not None:
         tle_command.extend(["--tle-file", str(args.tle_file.expanduser().resolve())])
+    else:
+        tle_command.extend(["--tle-source", args.tle_source])
     run_command(tle_command, project_root, "TLE/SGP4")
 
 

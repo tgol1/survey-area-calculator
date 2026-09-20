@@ -4,9 +4,11 @@
 GOES-18 is propagated locally with the standard SGP4 model.  The SGP4 TEME
 position is transformed to GCRS with Astropy, and Astropy's built-in solar-
 system ephemeris supplies geocentric Moon and Sun positions.  No JPL Horizons
-query or downloaded SPK/BSP kernel is used.  The program first tries to obtain
-the current GOES-18 TLE from CelesTrak and automatically uses the bundled TLE
-file if that download is unavailable.
+query or downloaded SPK/BSP kernel is used.  When Space-Track credentials are
+configured, the program downloads GP_HISTORY records around the requested
+dates and propagates every sample with the nearest TLE epoch.  Otherwise it
+uses CelesTrak's latest TLE and retains the bundled element set as an offline
+fallback.
 
 This file reuses the tested spherical-cap geometry, adaptive angular sampling,
 CSV writer, and plot writer from ``goes18_visible_sky.py``.  Keep both Python
@@ -17,12 +19,16 @@ from __future__ import annotations
 
 import argparse
 import csv
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from http.cookiejar import CookieJar
+import os
 from pathlib import Path
 import sys
 import warnings
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.parse import urlencode
+from urllib.request import HTTPCookieProcessor, Request, build_opener, urlopen
 
 import numpy as np
 from astropy import units as u
@@ -69,25 +75,40 @@ CELESTRAK_TLE_URL = (
     "https://celestrak.org/NORAD/elements/"
     "gp.php?CATNR=51850&FORMAT=TLE"
 )
+SPACE_TRACK_BASE_URL = "https://www.space-track.org"
+SPACE_TRACK_IDENTITY_ENV = "SPACETRACK_IDENTITY"
+SPACE_TRACK_PASSWORD_ENV = "SPACETRACK_PASSWORD"
 FINE_STEP_MINUTES = 5
 DEFAULT_MAX_TLE_AGE_DAYS = 14.0
 DEFAULT_FALLBACK_TLE_FILE = Path(__file__).with_name("goes18_2026-08-27.tle")
+DEFAULT_TLE_CACHE_DIR = Path(__file__).with_name("tle_cache")
+HISTORICAL_QUERY_PADDING_DAYS = 7
 
 
-def parse_tle_text(text: str, source: str) -> tuple[str, str, str]:
-    """Extract a satellite name and two TLE element lines."""
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
-    line1_index = next(
-        (index for index, line in enumerate(lines) if line.startswith("1 ")),
-        None,
-    )
-    if line1_index is None or line1_index + 1 >= len(lines):
-        raise ValueError(f"No two-line element set was found in {source}.")
+@dataclass(frozen=True)
+class TLERecord:
+    """One validated GOES-18 two-line element set and its provenance."""
 
-    line1 = lines[line1_index]
-    line2 = lines[line1_index + 1]
-    if not line2.startswith("2 "):
-        raise ValueError(f"The second element line is missing from {source}.")
+    name: str
+    line1: str
+    line2: str
+    source: str
+
+    def satellite(self) -> Satrec:
+        """Build the SGP4 record represented by this element set."""
+        satellite = Satrec.twoline2rv(self.line1, self.line2, WGS72)
+        if satellite.satnum != GOES18_NORAD_ID:
+            raise ValueError(
+                f"TLE resolved to NORAD {satellite.satnum}, not GOES-18 "
+                f"({GOES18_NORAD_ID})."
+            )
+        return satellite
+
+
+def validate_tle_lines(line1: str, line2: str, source: str) -> None:
+    """Validate that two element lines both describe GOES-18."""
+    if not line1.startswith("1 ") or not line2.startswith("2 "):
+        raise ValueError(f"Invalid two-line element set in {source}.")
 
     line1_satellite = line1[2:7].strip()
     line2_satellite = line2[2:7].strip()
@@ -99,14 +120,42 @@ def parse_tle_text(text: str, source: str) -> tuple[str, str, str]:
             f"but {source} contains {line1_satellite}."
         )
 
-    if line1_index > 0 and not lines[line1_index - 1].startswith(("1 ", "2 ")):
-        name = lines[line1_index - 1].removeprefix("0 ").strip()
-    else:
-        name = "GOES 18"
-    return name, line1, line2
+
+def parse_tle_records(text: str, source: str) -> list[TLERecord]:
+    """Extract every valid GOES-18 TLE from a text response or local file."""
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    records: list[TLERecord] = []
+    seen: set[tuple[str, str]] = set()
+    for index, line1 in enumerate(lines):
+        if not line1.startswith("1 "):
+            continue
+        if index + 1 >= len(lines):
+            raise ValueError(f"The second element line is missing from {source}.")
+        line2 = lines[index + 1]
+        validate_tle_lines(line1, line2, source)
+        key = (line1, line2)
+        if key in seen:
+            continue
+        seen.add(key)
+        if index > 0 and not lines[index - 1].startswith(("1 ", "2 ")):
+            name = lines[index - 1].removeprefix("0 ").strip()
+        else:
+            name = "GOES 18"
+        records.append(TLERecord(name, line1, line2, source))
+
+    if not records:
+        raise ValueError(f"No two-line element set was found in {source}.")
+    records.sort(key=lambda record: tle_epoch_jd(record.satellite()))
+    return records
 
 
-def fetch_current_tle(url: str) -> tuple[str, str, str]:
+def parse_tle_text(text: str, source: str) -> tuple[str, str, str]:
+    """Extract the first GOES-18 element set for backward compatibility."""
+    record = parse_tle_records(text, source)[0]
+    return record.name, record.line1, record.line2
+
+
+def fetch_current_tle(url: str) -> list[TLERecord]:
     """Download the current GOES-18 TLE from CelesTrak."""
     request = Request(url, headers={"User-Agent": "GOES18-TLE-sky/1.0"})
     try:
@@ -117,16 +166,157 @@ def fetch_current_tle(url: str) -> tuple[str, str, str]:
             "Could not download the GOES-18 TLE from CelesTrak: "
             f"{exc}"
         ) from exc
-    return parse_tle_text(text, url)
+    return parse_tle_records(text, url)
 
 
-def read_tle_file(path: Path) -> tuple[str, str, str]:
-    """Read and validate a local GOES-18 TLE file."""
+def read_tle_file(path: Path) -> list[TLERecord]:
+    """Read and validate one or more GOES-18 TLEs from a local file."""
     try:
         text = path.read_text(encoding="ascii")
     except (OSError, UnicodeDecodeError) as exc:
         raise RuntimeError(f"Could not read TLE file {path}: {exc}") from exc
-    return parse_tle_text(text, str(path))
+    return parse_tle_records(text, str(path.resolve()))
+
+
+def tle_epoch_jd(satellite: Satrec) -> float:
+    """Return a satellite record's UTC-like TLE epoch as a Julian date."""
+    return float(satellite.jdsatepoch + satellite.jdsatepochF)
+
+
+def save_tle_records(path: Path, records: list[TLERecord]) -> None:
+    """Write one or more element sets in conventional three-line format."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = "".join(
+        f"{record.name}\n{record.line1}\n{record.line2}\n" for record in records
+    )
+    path.write_text(text, encoding="ascii")
+
+
+def space_track_credentials() -> tuple[str, str] | None:
+    """Read Space-Track credentials from environment variables, if configured."""
+    identity = os.environ.get(SPACE_TRACK_IDENTITY_ENV, "").strip()
+    password = os.environ.get(SPACE_TRACK_PASSWORD_ENV, "")
+    if identity and password:
+        return identity, password
+    return None
+
+
+def fetch_historical_tles(
+    start: str,
+    stop: str,
+    cache_dir: Path,
+    identity: str,
+    password: str,
+) -> list[TLERecord]:
+    """Fetch and cache Space-Track GP_HISTORY records around a date range."""
+    start_date = datetime.strptime(start, "%Y-%m-%d").date()
+    stop_date = datetime.strptime(stop, "%Y-%m-%d").date()
+    query_start = start_date - timedelta(days=HISTORICAL_QUERY_PADDING_DAYS)
+    query_stop = stop_date + timedelta(days=HISTORICAL_QUERY_PADDING_DAYS + 1)
+    cache_path = cache_dir / (
+        f"goes18_{query_start:%Y%m%d}_{query_stop:%Y%m%d}_gp_history.tle"
+    )
+
+    if cache_path.is_file():
+        try:
+            records = read_tle_file(cache_path)
+            print(f"Using cached Space-Track TLE history: {cache_path.resolve()}")
+            return records
+        except (RuntimeError, ValueError) as exc:
+            print(f"Ignoring invalid TLE cache {cache_path}: {exc}")
+
+    login_url = f"{SPACE_TRACK_BASE_URL}/ajaxauth/login"
+    query_url = (
+        f"{SPACE_TRACK_BASE_URL}/basicspacedata/query/class/gp_history/"
+        f"NORAD_CAT_ID/{GOES18_NORAD_ID}/"
+        f"EPOCH/{query_start.isoformat()}--{query_stop.isoformat()}/"
+        "orderby/EPOCH%20asc/format/tle/emptyresult/show"
+    )
+    opener = build_opener(HTTPCookieProcessor(CookieJar()))
+    login_data = urlencode({"identity": identity, "password": password}).encode()
+    headers = {"User-Agent": "GOES18-TLE-sky/2.0"}
+    try:
+        login_request = Request(login_url, data=login_data, headers=headers)
+        with opener.open(login_request, timeout=45) as response:
+            login_reply = response.read().decode("utf-8", errors="replace")
+        if "failed" in login_reply.lower() or "invalid" in login_reply.lower():
+            raise RuntimeError("Space-Track rejected the configured credentials.")
+
+        with opener.open(Request(query_url, headers=headers), timeout=60) as response:
+            text = response.read().decode("ascii")
+    except (HTTPError, URLError, TimeoutError, UnicodeDecodeError, OSError) as exc:
+        raise RuntimeError(f"Could not download Space-Track TLE history: {exc}") from exc
+
+    records = parse_tle_records(text, query_url)
+    try:
+        save_tle_records(cache_path, records)
+        print(f"Cached Space-Track TLE history: {cache_path.resolve()}")
+    except OSError as exc:
+        print(f"Could not write TLE cache {cache_path}: {exc}")
+    return records
+
+
+def load_tle_records(
+    path: Path | None,
+    url: str,
+    fallback_path: Path,
+    start: str,
+    stop: str,
+    source_mode: str,
+    cache_dir: Path,
+) -> tuple[list[TLERecord], str]:
+    """Select explicit, historical, current, or fallback GOES-18 elements."""
+    if path is not None:
+        return read_tle_file(path), str(path.resolve())
+
+    if source_mode in {"auto", "space-track"}:
+        credentials = space_track_credentials()
+        if credentials is None:
+            message = (
+                "Space-Track credentials are not configured. Set "
+                f"{SPACE_TRACK_IDENTITY_ENV} and {SPACE_TRACK_PASSWORD_ENV} "
+                "to retrieve historical TLEs near the requested dates."
+            )
+            if source_mode == "space-track":
+                raise RuntimeError(message)
+            print(message)
+        else:
+            print("Downloading date-matched GOES-18 TLE history from Space-Track...")
+            try:
+                records = fetch_historical_tles(
+                    start,
+                    stop,
+                    cache_dir,
+                    credentials[0],
+                    credentials[1],
+                )
+                return records, "Space-Track GP_HISTORY"
+            except (RuntimeError, ValueError) as historical_error:
+                if source_mode == "space-track":
+                    raise
+                print(f"Historical TLE download failed: {historical_error}")
+
+    if source_mode in {"auto", "celestrak"}:
+        print("Downloading the latest GOES-18 TLE from CelesTrak...")
+        try:
+            return fetch_current_tle(url), url
+        except (RuntimeError, ValueError) as online_error:
+            print(f"Online TLE download failed: {online_error}")
+
+    if not fallback_path.is_file():
+        raise RuntimeError(
+            "No usable online TLE was found and the fallback TLE file does not "
+            f"exist: {fallback_path}"
+        )
+    print(f"Using fallback GOES-18 TLE: {fallback_path.resolve()}")
+    try:
+        records = read_tle_file(fallback_path)
+    except (RuntimeError, ValueError) as fallback_error:
+        raise RuntimeError(
+            "The online TLE download failed, and the fallback TLE could "
+            f"not be loaded from {fallback_path}: {fallback_error}"
+        ) from fallback_error
+    return records, f"{fallback_path.resolve()} (offline fallback)"
 
 
 def load_tle(
@@ -134,36 +324,34 @@ def load_tle(
     url: str,
     fallback_path: Path,
 ) -> tuple[str, str, str, str]:
-    """Load an explicit TLE, or try CelesTrak then the bundled fallback."""
+    """Backward-compatible single-TLE loader used by older callers."""
     if path is not None:
-        name, line1, line2 = read_tle_file(path)
-        return name, line1, line2, str(path.resolve())
-
+        record = read_tle_file(path)[0]
+        return record.name, record.line1, record.line2, str(path.resolve())
     try:
-        name, line1, line2 = fetch_current_tle(url)
-        return name, line1, line2, url
+        record = fetch_current_tle(url)[0]
+        return record.name, record.line1, record.line2, url
     except (RuntimeError, ValueError) as online_error:
         print(f"Online TLE download failed: {online_error}")
         print(f"Using fallback GOES-18 TLE: {fallback_path.resolve()}")
         try:
-            name, line1, line2 = read_tle_file(fallback_path)
+            record = read_tle_file(fallback_path)[0]
         except (RuntimeError, ValueError) as fallback_error:
             raise RuntimeError(
                 "The online TLE download failed, and the fallback TLE could "
                 f"not be loaded from {fallback_path}: {fallback_error}"
             ) from fallback_error
         return (
-            name,
-            line1,
-            line2,
+            record.name,
+            record.line1,
+            record.line2,
             f"{fallback_path.resolve()} (offline fallback)",
         )
 
 
 def save_used_tle(path: Path, name: str, line1: str, line2: str) -> None:
-    """Save the exact TLE used so a run can be reproduced later."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(f"{name}\n{line1}\n{line2}\n", encoding="ascii")
+    """Save one exact TLE; retained for compatibility with older callers."""
+    save_tle_records(path, [TLERecord(name, line1, line2, str(path))])
 
 
 def build_sample_datetimes(
@@ -188,21 +376,34 @@ def tle_epoch(satellite: Satrec) -> Time:
     )
 
 
+def nearest_tle_indices(times: Time, satellites: list[Satrec]) -> np.ndarray:
+    """Select the element-set epoch closest to every requested sample."""
+    if not satellites:
+        raise ValueError("At least one TLE satellite record is required.")
+    epochs_jd = np.asarray([tle_epoch_jd(item) for item in satellites])
+    distances = np.abs(np.asarray(times.utc.jd)[:, np.newaxis] - epochs_jd)
+    return np.argmin(distances, axis=1).astype(int)
+
+
 def warn_if_tle_is_stale(
     times: Time,
-    satellite: Satrec,
+    satellites: list[Satrec],
+    selected_tle_indices: np.ndarray,
     max_age_days: float,
 ) -> float:
-    """Warn when the propagation interval is far from the TLE epoch."""
-    age_days = np.abs(times.utc.jd - tle_epoch(satellite).utc.jd)
+    """Warn when samples are far from their nearest available TLE epochs."""
+    epochs_jd = np.asarray([tle_epoch_jd(item) for item in satellites])
+    selected_epochs = epochs_jd[selected_tle_indices]
+    age_days = np.abs(np.asarray(times.utc.jd) - selected_epochs)
     maximum_age = float(np.max(age_days))
     if maximum_age > max_age_days:
         warnings.warn(
-            "The requested range extends "
-            f"{maximum_age:.1f} days from the TLE epoch. TLE/SGP4 accuracy "
+            "At least one requested sample is "
+            f"{maximum_age:.1f} days from its nearest available TLE epoch. "
+            "TLE/SGP4 accuracy "
             "degrades away from the epoch and across station-keeping "
-            "maneuvers. Use a historical GOES-18 TLE near the requested "
-            "dates with --tle-file.",
+            "maneuvers. Configure Space-Track GP_HISTORY credentials or use "
+            "a local historical TLE file covering the requested dates.",
             RuntimeWarning,
             stacklevel=2,
         )
@@ -211,7 +412,8 @@ def warn_if_tle_is_stale(
 
 def propagate_tle_ephemeris(
     datetimes: list[datetime],
-    satellite: Satrec,
+    satellites: list[Satrec],
+    selected_tle_indices: np.ndarray,
 ) -> dict[str, np.ndarray | Time]:
     """Generate GOES-18 and Earth/Moon/Sun vectors on the UTC time grid.
 
@@ -222,10 +424,24 @@ def propagate_tle_ephemeris(
     geometry calculation.
     """
     times = Time(datetimes, scale="utc")
-    errors, teme_position, teme_velocity = satellite.sgp4_array(
-        np.asarray(times.utc.jd1, dtype=float),
-        np.asarray(times.utc.jd2, dtype=float),
-    )
+    sample_count = len(datetimes)
+    if selected_tle_indices.shape != (sample_count,):
+        raise ValueError("selected_tle_indices must contain one entry per sample.")
+
+    errors = np.zeros(sample_count, dtype=np.uint8)
+    teme_position = np.empty((sample_count, 3), dtype=float)
+    teme_velocity = np.empty((sample_count, 3), dtype=float)
+    for record_index in np.unique(selected_tle_indices):
+        mask = selected_tle_indices == record_index
+        subset_errors, subset_position, subset_velocity = satellites[
+            int(record_index)
+        ].sgp4_array(
+            np.asarray(times.utc.jd1[mask], dtype=float),
+            np.asarray(times.utc.jd2[mask], dtype=float),
+        )
+        errors[mask] = subset_errors
+        teme_position[mask] = subset_position
+        teme_velocity[mask] = subset_velocity
     if np.any(errors != 0):
         failures = sorted({int(code) for code in errors if code != 0})
         explanations = ", ".join(
@@ -261,9 +477,14 @@ def propagate_tle_ephemeris(
     earth_from_goes_km = -goes_gcrs_km
     moon_from_goes_km = moon_geocentric_km - goes_gcrs_km
     sun_from_goes_km = sun_geocentric_km - goes_gcrs_km
+    tle_epochs_jd = np.asarray([tle_epoch_jd(item) for item in satellites])
+    selected_epochs_jd = tle_epochs_jd[selected_tle_indices]
 
     return {
         "times": times,
+        "tle_record_index": np.asarray(selected_tle_indices, dtype=int),
+        "tle_epoch_jd": selected_epochs_jd,
+        "tle_age_days": np.asarray(times.utc.jd) - selected_epochs_jd,
         "goes_teme_position_km": np.asarray(teme_position, dtype=float),
         "goes_teme_velocity_km_s": np.asarray(teme_velocity, dtype=float),
         "goes_gcrs_position_km": goes_gcrs_km,
@@ -295,10 +516,16 @@ def write_ephemeris_csv(
     earth_vectors = np.asarray(ephemeris["earth_from_goes_km"])
     moon_vectors = np.asarray(ephemeris["moon_from_goes_km"])
     sun_vectors = np.asarray(ephemeris["sun_from_goes_km"])
+    tle_record_indices = np.asarray(ephemeris["tle_record_index"], dtype=int)
+    tle_epochs_jd = np.asarray(ephemeris["tle_epoch_jd"], dtype=float)
+    tle_ages_days = np.asarray(ephemeris["tle_age_days"], dtype=float)
 
     header = [
         "utc",
         "julian_date_ut",
+        "tle_record_index",
+        "tle_epoch_utc",
+        "tle_age_days",
         "goes18_teme_x_km",
         "goes18_teme_y_km",
         "goes18_teme_z_km",
@@ -337,6 +564,13 @@ def write_ephemeris_csv(
                 [
                     timestamp.strftime("%Y-%m-%dT%H:%M:%SZ"),
                     f"{times.utc.jd[index]:.9f}",
+                    str(tle_record_indices[index]),
+                    Time(
+                        tle_epochs_jd[index], format="jd", scale="utc"
+                    ).to_datetime(timezone=timezone.utc).strftime(
+                        "%Y-%m-%dT%H:%M:%SZ"
+                    ),
+                    f"{tle_ages_days[index]:.9f}",
                     *(f"{value:.9f}" for value in values),
                 ]
             )
@@ -366,7 +600,18 @@ def parse_arguments() -> argparse.Namespace:
         "--tle-file",
         type=Path,
         help=(
-            "Use this local GOES-18 TLE instead of attempting an online download"
+            "Use this local GOES-18 TLE file instead of online selection; the "
+            "file may contain multiple historical element sets"
+        ),
+    )
+    parser.add_argument(
+        "--tle-source",
+        choices=("auto", "space-track", "celestrak"),
+        default="auto",
+        help=(
+            "Online TLE source when --tle-file is omitted. 'auto' uses "
+            "Space-Track GP_HISTORY when credentials are configured, then "
+            "falls back to the latest CelesTrak TLE (default: auto)"
         ),
     )
     parser.add_argument(
@@ -383,6 +628,15 @@ def parse_arguments() -> argparse.Namespace:
         help=(
             "Local TLE used automatically if the CelesTrak download fails "
             "(default: goes18_2026-08-27.tle beside this script)"
+        ),
+    )
+    parser.add_argument(
+        "--tle-cache-dir",
+        type=Path,
+        default=DEFAULT_TLE_CACHE_DIR,
+        help=(
+            "Directory for cached Space-Track history responses "
+            "(default: tle_cache beside this script)"
         ),
     )
     parser.add_argument(
@@ -462,32 +716,38 @@ def main() -> None:
     if args.exposure_sky_points < 1000:
         raise SystemExit("--exposure-sky-points must be at least 1000.")
 
-    if args.tle_file is None:
-        print("Downloading current GOES-18 TLE from CelesTrak...")
-    else:
-        print(f"Reading GOES-18 TLE from {args.tle_file}...")
-    name, line1, line2, tle_source = load_tle(
+    if args.tle_file is not None:
+        print(f"Reading GOES-18 TLE data from {args.tle_file}...")
+    records, tle_source = load_tle_records(
         args.tle_file,
         args.tle_url,
         args.fallback_tle_file,
+        start,
+        stop,
+        args.tle_source,
+        args.tle_cache_dir,
     )
-    satellite = Satrec.twoline2rv(line1, line2, WGS72)
-    if satellite.satnum != GOES18_NORAD_ID:
-        raise RuntimeError(
-            f"TLE resolved to NORAD {satellite.satnum}, not GOES-18 "
-            f"({GOES18_NORAD_ID})."
-        )
+    satellites = [record.satellite() for record in records]
 
     datetimes = build_sample_datetimes(start, stop)
     astropy_times = Time(datetimes, scale="utc")
+    selected_tle_indices = nearest_tle_indices(astropy_times, satellites)
     maximum_tle_age = warn_if_tle_is_stale(
         astropy_times,
-        satellite,
+        satellites,
+        selected_tle_indices,
         args.max_tle_age,
     )
 
-    print("Propagating GOES-18 with SGP4 and generating Moon/Sun ephemerides...")
-    ephemeris = propagate_tle_ephemeris(datetimes, satellite)
+    print(
+        "Propagating GOES-18 with the nearest available TLE at each sample "
+        "and generating Moon/Sun ephemerides..."
+    )
+    ephemeris = propagate_tle_ephemeris(
+        datetimes,
+        satellites,
+        selected_tle_indices,
+    )
     earth_vectors = np.asarray(ephemeris["earth_from_goes_km"])
     moon_vectors = np.asarray(ephemeris["moon_from_goes_km"])
     sun_vectors = np.asarray(ephemeris["sun_from_goes_km"])
@@ -534,12 +794,19 @@ def main() -> None:
         args.output_prefix.name + "_ephemeris.csv"
     )
     tle_path = args.output_prefix.parent / (args.output_prefix.name + "_used.tle")
-    save_used_tle(tle_path, name, line1, line2)
+    used_record_indices = sorted({int(value) for value in selected_tle_indices})
+    used_records = [records[index] for index in used_record_indices]
+    save_tle_records(tle_path, used_records)
     write_ephemeris_csv(ephemeris_path, datetimes, ephemeris)
     write_results_csv(csv_path, selected_jd, selected_labels, selected_results)
 
-    epoch_datetime = tle_epoch(satellite).to_datetime(timezone=timezone.utc)
-    epoch_label = epoch_datetime.strftime("%Y-%m-%d %H:%M UTC")
+    used_satellites = [satellites[index] for index in used_record_indices]
+    used_epoch_datetimes = [
+        tle_epoch(satellite).to_datetime(timezone=timezone.utc)
+        for satellite in used_satellites
+    ]
+    first_epoch_label = min(used_epoch_datetimes).strftime("%Y-%m-%d %H:%M UTC")
+    last_epoch_label = max(used_epoch_datetimes).strftime("%Y-%m-%d %H:%M UTC")
     observer_name = "GOES-18 TLE/SGP4"
     sampling_description = f"5 min near angular alignments; {args.step} elsewhere"
     zoom_start, zoom_stop = write_plot(
@@ -584,10 +851,22 @@ def main() -> None:
     fraction = results["visible_fraction"]
     percent = 100.0 * fraction
     print(f"TLE source: {tle_source}")
-    print(f"TLE object: {name} (NORAD {satellite.satnum})")
-    print(f"TLE epoch: {epoch_label}")
-    print(f"Maximum distance from TLE epoch: {maximum_tle_age:.2f} days")
-    print(f"SGP4 mode: {'deep-space' if satellite.method == 'd' else 'near-Earth'}")
+    print(f"TLE object: GOES 18 (NORAD {GOES18_NORAD_ID})")
+    print(f"TLE records downloaded/loaded: {len(records)}")
+    print(f"TLE records actually used: {len(used_records)}")
+    print(f"Used TLE epoch range: {first_epoch_label} through {last_epoch_label}")
+    print(
+        "Maximum distance from each sample to its selected TLE epoch: "
+        f"{maximum_tle_age:.2f} days"
+    )
+    print(
+        "SGP4 mode: "
+        + (
+            "deep-space"
+            if all(satellite.method == "d" for satellite in used_satellites)
+            else "mixed/near-Earth"
+        )
+    )
     print(f"Date range: {start} through {stop} UTC")
     print(f"Sun exclusion angle: {sun_exclusion:g} degrees from Sun center")
     print(

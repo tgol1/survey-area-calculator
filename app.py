@@ -7,6 +7,7 @@ import base64
 import csv
 from datetime import date, timedelta
 import io
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -39,12 +40,6 @@ COMBINED_PROJECTION_PATH = (
     / "sky_projection"
     / "goes18_aitoff_mollweide_projection.png"
 )
-TLE_FILE = (
-    PROJECT_ROOT / "tle_sgp4_algorithm" / "goes18_2026-08-27.tle"
-)
-
-TLE_EPOCH = date(2026, 8, 27)
-RECOMMENDED_TLE_WINDOW_DAYS = 14
 MAX_HORIZONS_SPAN_DAYS = 34
 DEFAULT_DATE_RANGE = (date(2026, 8, 26), date(2026, 8, 28))
 DEFAULT_DAILY_WINDOW_1 = (date(2026, 1, 1), date(2026, 1, 15))
@@ -76,8 +71,8 @@ def set_background(image_path: Path) -> None:
         [data-testid="stAppViewContainer"] {{
             background-image:
                 linear-gradient(
-                    rgba(5, 10, 20, 0.45),
-                    rgba(5, 10, 20, 0.45)
+                    rgba(255, 255, 255, 0.82),
+                    rgba(255, 255, 255, 0.82)
                 ),
                 url("data:image/png;base64,{encoded_image}");
             background-size: cover;
@@ -91,6 +86,36 @@ def set_background(image_path: Path) -> None:
         }}
 
         [data-testid="stToolbar"] {{
+            background-color: transparent;
+        }}
+
+        .stTabs [data-baseweb="tab-list"] {{
+            gap: 10px;
+        }}
+
+        .stTabs button[data-baseweb="tab"] {{
+            background-color: rgba(5, 10, 20, 0.72);
+            border: 1px solid rgba(255, 255, 255, 0.25);
+            border-radius: 8px;
+            padding: 8px 16px;
+        }}
+
+        .stTabs button[data-baseweb="tab"] p {{
+            color: white;
+            font-weight: 600;
+        }}
+
+        .stTabs button[data-baseweb="tab"][aria-selected="true"] {{
+            background-color: rgba(255, 75, 75, 0.92);
+            border-color: white;
+        }}
+
+        .stTabs button[data-baseweb="tab"]:hover {{
+            background-color: rgba(30, 41, 59, 0.95);
+            border-color: rgba(255, 255, 255, 0.70);
+        }}
+
+        .stTabs [data-baseweb="tab-highlight"] {{
             background-color: transparent;
         }}
         </style>
@@ -166,28 +191,6 @@ def validate_horizons_span(start: date, stop: date) -> bool:
     return True
 
 
-def show_tle_epoch_warning(start: date, stop: date, comparison: bool) -> None:
-    """Warn when a requested range is far from the saved TLE epoch."""
-    maximum_offset = max(
-        abs((start - TLE_EPOCH).days),
-        abs((stop - TLE_EPOCH).days),
-    )
-    if maximum_offset <= RECOMMENDED_TLE_WINDOW_DAYS:
-        return
-
-    consequence = (
-        "the comparison graph may show large, structured differences that "
-        "are caused by propagation far from the TLE epoch"
-        if comparison
-        else "the propagated satellite position and visible-sky results may be inaccurate"
-    )
-    st.warning(
-        f"The selected range extends {maximum_offset} days from the "
-        f"August 27, 2026 TLE epoch. Because this exceeds the recommended "
-        f"±{RECOMMENDED_TLE_WINDOW_DAYS}-day window, {consequence}."
-    )
-
-
 def required_files_exist(paths: list[Path]) -> bool:
     """Show friendly errors for files missing from the deployed branch."""
     missing = [path.relative_to(PROJECT_ROOT) for path in paths if not path.is_file()]
@@ -201,7 +204,33 @@ def required_files_exist(paths: list[Path]) -> bool:
     return False
 
 
-def run_command(command: list[str], timeout_seconds: int = 1_200) -> tuple[int, str]:
+def tle_runtime_environment() -> dict[str, str]:
+    """Forward optional Space-Track secrets to calculation subprocesses."""
+    environment = os.environ.copy()
+    try:
+        configured_secrets = st.secrets.to_dict()
+    except Exception:
+        configured_secrets = {}
+    for key in ("SPACETRACK_IDENTITY", "SPACETRACK_PASSWORD"):
+        if key in configured_secrets:
+            environment[key] = str(configured_secrets[key])
+    return environment
+
+
+def has_spacetrack_credentials() -> bool:
+    """Return whether both historical-TLE credentials are configured."""
+    environment = tle_runtime_environment()
+    return bool(
+        environment.get("SPACETRACK_IDENTITY")
+        and environment.get("SPACETRACK_PASSWORD")
+    )
+
+
+def run_command(
+    command: list[str],
+    timeout_seconds: int = 1_200,
+    environment: dict[str, str] | None = None,
+) -> tuple[int, str]:
     """Run a fixed command and return its status and terminal text."""
     try:
         completed = subprocess.run(
@@ -211,6 +240,7 @@ def run_command(command: list[str], timeout_seconds: int = 1_200) -> tuple[int, 
             text=True,
             timeout=timeout_seconds,
             check=False,
+            env=environment,
         )
     except subprocess.TimeoutExpired as exc:
         stdout = exc.stdout.decode() if isinstance(exc.stdout, bytes) else (exc.stdout or "")
@@ -365,8 +395,8 @@ def run_horizons(start: date, stop: date, sun_angle: int) -> None:
 
 
 def run_tle(start: date, stop: date, sun_angle: int) -> None:
-    """Run the saved-TLE/SGP4 method and retain its outputs."""
-    if not required_files_exist([TLE_SCRIPT, HORIZONS_SCRIPT, TLE_FILE]):
+    """Run the date-aware TLE/SGP4 method and retain its outputs."""
+    if not required_files_exist([TLE_SCRIPT, HORIZONS_SCRIPT]):
         return
 
     with tempfile.TemporaryDirectory(prefix="goes18-tle-") as directory:
@@ -380,13 +410,14 @@ def run_tle(start: date, stop: date, sun_angle: int) -> None:
             stop.isoformat(),
             "--sun-exclusion",
             str(sun_angle),
-            "--tle-file",
-            str(TLE_FILE),
             "--output-prefix",
             str(prefix),
         ]
-        with st.spinner("Propagating the August 27, 2026 TLE with SGP4..."):
-            return_code, log = run_command(command)
+        with st.spinner("Selecting date-matched TLE data and propagating with SGP4..."):
+            return_code, log = run_command(
+                command,
+                environment=tle_runtime_environment(),
+            )
 
         csv_path = prefix.with_suffix(".csv")
         csv_bytes = read_file_bytes(csv_path)
@@ -428,7 +459,7 @@ def run_tle(start: date, stop: date, sun_angle: int) -> None:
 def run_comparison(start: date, stop: date, sun_angle: int) -> None:
     """Run both algorithms and retain their comparison outputs."""
     if not required_files_exist(
-        [COMPARISON_SCRIPT, HORIZONS_SCRIPT, TLE_SCRIPT, TLE_FILE]
+        [COMPARISON_SCRIPT, HORIZONS_SCRIPT, TLE_SCRIPT]
     ):
         return
 
@@ -450,13 +481,14 @@ def run_comparison(start: date, stop: date, sun_angle: int) -> None:
             str(horizons_csv),
             "--tle-csv",
             str(tle_csv),
-            "--tle-file",
-            str(TLE_FILE),
             "--output",
             str(comparison_png),
         ]
         with st.spinner("Running both methods and generating the comparison..."):
-            return_code, log = run_command(command)
+            return_code, log = run_command(
+                command,
+                environment=tle_runtime_environment(),
+            )
 
         save_result(
             "comparison_result",
@@ -735,10 +767,18 @@ with method_tabs[0]:
 
 with method_tabs[1]:
     st.info(
-        "This website uses the saved GOES-18 TLE with an epoch of "
-        "August 27, 2026. SGP4 is most reliable when propagated close to "
-        "the TLE epoch."
+        "The TLE algorithm now selects element sets by date. With Space-Track "
+        "credentials configured, it downloads GP_HISTORY records around the "
+        "requested range and uses the nearest TLE epoch for every sample. "
+        "Without credentials it uses CelesTrak's latest TLE and reports how "
+        "far the requested samples are from that epoch."
     )
+    if not has_spacetrack_credentials():
+        st.warning(
+            "Historical TLE lookup is not configured on this deployment. Add "
+            "SPACETRACK_IDENTITY and SPACETRACK_PASSWORD to Streamlit secrets "
+            "for accurate calculations on dates far from the current TLE epoch."
+        )
     with st.form("tle_form"):
         tle_dates = st.date_input(
             "UTC date range",
@@ -762,18 +802,16 @@ with method_tabs[1]:
     if tle_submit:
         selected = normalize_date_range(tle_dates)
         if selected:
-            show_tle_epoch_warning(*selected, comparison=False)
             run_tle(*selected, tle_sun_angle)
     render_result("tle_result")
 
 
 with method_tabs[2]:
     st.warning(
-        "The comparison uses the saved GOES-18 TLE with an epoch of "
-        "August 27, 2026. Selecting a date window far outside this epoch "
-        "can produce inaccurate or misleading comparison graphs because "
-        "TLE/SGP4 propagation error grows away from the element-set epoch. "
-        "Use dates within approximately ±14 days whenever possible."
+        "The comparison is meaningful only when TLE epochs are close to the "
+        "selected dates. Configure Space-Track credentials so the TLE method "
+        "can retrieve historical GP records; otherwise the script falls back "
+        "to CelesTrak's latest TLE and emits a stale-epoch warning when needed."
     )
     with st.form("comparison_form"):
         comparison_dates = st.date_input(
@@ -798,7 +836,6 @@ with method_tabs[2]:
     if comparison_submit:
         selected = normalize_date_range(comparison_dates)
         if selected and validate_horizons_span(*selected):
-            show_tle_epoch_warning(*selected, comparison=True)
             run_comparison(*selected, comparison_sun_angle)
     render_result("comparison_result")
 
