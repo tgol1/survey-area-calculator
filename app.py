@@ -76,8 +76,8 @@ def set_background(image_path: Path) -> None:
         [data-testid="stAppViewContainer"] {{
             background-image:
                 linear-gradient(
-                    rgba(5, 10, 20, 0.45),
-                    rgba(5, 10, 20, 0.45)
+                    rgba(255, 255, 255, 0.82),
+                    rgba(255, 255, 255, 0.82)
                 ),
                 url("data:image/png;base64,{encoded_image}");
             background-size: cover;
@@ -91,6 +91,36 @@ def set_background(image_path: Path) -> None:
         }}
 
         [data-testid="stToolbar"] {{
+            background-color: transparent;
+        }}
+
+        .stTabs [data-baseweb="tab-list"] {{
+            gap: 10px;
+        }}
+
+        .stTabs button[data-baseweb="tab"] {{
+            background-color: rgba(5, 10, 20, 0.72);
+            border: 1px solid rgba(255, 255, 255, 0.25);
+            border-radius: 8px;
+            padding: 8px 16px;
+        }}
+
+        .stTabs button[data-baseweb="tab"] p {{
+            color: white;
+            font-weight: 600;
+        }}
+
+        .stTabs button[data-baseweb="tab"][aria-selected="true"] {{
+            background-color: rgba(255, 75, 75, 0.92);
+            border-color: white;
+        }}
+
+        .stTabs button[data-baseweb="tab"]:hover {{
+            background-color: rgba(30, 41, 59, 0.95);
+            border-color: rgba(255, 255, 255, 0.70);
+        }}
+
+        .stTabs [data-baseweb="tab-highlight"] {{
             background-color: transparent;
         }}
         </style>
