@@ -1,7 +1,7 @@
-## Survey Area Calculator v3
+## Survey Area Calculator v4.1
 George Tolis
 
-Last updated: 12 September 2026
+Last updated: 20 September 2026
 
 ## Changelog
 Every new version number represents completion of additional assignments for project.
@@ -44,6 +44,9 @@ v4 - 18 September 2026
 - Updated "Algorithm Comparison" section of README to reflect changes in the algorithm comparison. 
 - Website reflects changes in algorithm comparison
 - Introduced trial function: two 2 week sections picked manually or at random are compared with each other and the differences are plotted. Utilizes JPL algorithm.
+
+v4.1 - 20 September 2026
+- Added Aitoff-Mollweide projections to webstie
 
 ## Function
 Script computes the instantaneous visible fraction of sky from GOES-18 - a satellite positioned at 137W around Hawaii.
