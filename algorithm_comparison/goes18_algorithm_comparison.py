@@ -5,11 +5,15 @@ The program prompts once for a UTC start date, end date, and Sun exclusion
 angle. It then launches both existing visible-sky programs with the same
 settings and forces both CSV outputs to a uniform five-minute cadence. Each
 source CSV supplies the geocentric right ascension and declination of GOES-18.
-The comparison converts those directions to unit vectors and calculates their
-great-circle angular separation in arcseconds.
+The comparison calculates signed coordinate residuals in arcseconds using the
+convention JPL Horizons minus TLE/SGP4.  Right-ascension differences are wrapped
+across 0/360 degrees so a coordinate-boundary crossing cannot create a false
+360-degree jump.
 
-One PNG is written beside this script. Its upper panel shows angular separation
-versus time, and its lower panel is an ordinary histogram of those separations.
+One PNG is written beside this script. Its upper panel shows the signed
+right-ascension residual versus time, and its lower panel shows the signed
+declination residual versus time.  Each panel includes zero and mean-bias
+reference lines so systematic or periodic structure is easy to identify.
 
 Expected repository structure:
 
@@ -72,14 +76,15 @@ class EphemerisData:
 
 
 @dataclass(frozen=True)
-class AngularSeparationStatistics:
-    """Empirical summary of the Horizons-to-TLE angular separations."""
+class ResidualStatistics:
+    """Summary of signed Horizons-minus-TLE RA and declination residuals."""
 
-    mean_arcsec: float
-    median_arcsec: float
-    rms_arcsec: float
-    percentile_95_arcsec: float
-    maximum_arcsec: float
+    ra_mean_arcsec: float
+    ra_standard_deviation_arcsec: float
+    ra_rms_arcsec: float
+    dec_mean_arcsec: float
+    dec_standard_deviation_arcsec: float
+    dec_rms_arcsec: float
 
 
 def parse_arguments() -> argparse.Namespace:
@@ -299,6 +304,10 @@ def run_source_algorithms(
         sys.executable,
         str(tle_script),
         *common_arguments,
+        # Match the Horizons solar-system ephemeris so the residuals isolate
+        # the GOES-18 TLE/SGP4 spacecraft trajectory as closely as possible.
+        "--body-ephemeris",
+        "horizons",
         "--output-prefix",
         str(tle_prefix),
     ]
@@ -444,8 +453,8 @@ def align_results(
             if maximum_step != FIVE_MINUTES:
                 print(
                     f"Warning: {data.label} existing CSV has sampling intervals "
-                    f"as large as {maximum_step}; histogram points are not "
-                    "uniformly time-weighted."
+                    f"as large as {maximum_step}; the residual time series is "
+                    "not uniformly sampled."
                 )
 
     horizons_radec = np.asarray(
@@ -459,75 +468,40 @@ def align_results(
     return common_times, horizons_radec, tle_radec
 
 
-def histogram_bin_edges(values: np.ndarray) -> np.ndarray:
-    """Choose stable histogram bins using the Freedman-Diaconis rule."""
-    value_min = float(np.min(values))
-    value_max = float(np.max(values))
-    if math.isclose(value_min, value_max, rel_tol=0.0, abs_tol=1.0e-12):
-        half_width = max(0.001, 0.05 * max(1.0, abs(value_min)))
-        return np.linspace(value_min - half_width, value_max + half_width, 13)
-
-    first_quartile, third_quartile = np.percentile(values, (25.0, 75.0))
-    interquartile_range = float(third_quartile - first_quartile)
-    if interquartile_range > 0.0:
-        bin_width = 2.0 * interquartile_range / np.cbrt(len(values))
-        bin_count = int(math.ceil((value_max - value_min) / bin_width))
-    else:
-        bin_count = int(math.ceil(math.sqrt(len(values))))
-    bin_count = max(12, min(80, bin_count))
-    return np.linspace(value_min, value_max, bin_count + 1)
-
-
-def radec_to_unit_vectors(radec_deg: np.ndarray) -> np.ndarray:
-    """Convert an N-by-2 RA/Dec array in degrees to Cartesian unit vectors."""
-    coordinates = np.asarray(radec_deg, dtype=float)
-    if coordinates.ndim != 2 or coordinates.shape[1] != 2:
-        raise ValueError("RA/Dec coordinates must have shape (samples, 2).")
-    right_ascension = np.radians(coordinates[:, 0])
-    declination = np.radians(coordinates[:, 1])
-    cosine_declination = np.cos(declination)
-    return np.column_stack(
-        (
-            cosine_declination * np.cos(right_ascension),
-            cosine_declination * np.sin(right_ascension),
-            np.sin(declination),
-        )
-    )
-
-
-def angular_separation_arcseconds(
+def coordinate_residuals_arcseconds(
     horizons_radec_deg: np.ndarray,
     tle_radec_deg: np.ndarray,
-) -> np.ndarray:
-    """Return stable great-circle separations between paired RA/Dec samples."""
-    horizons_unit = radec_to_unit_vectors(horizons_radec_deg)
-    tle_unit = radec_to_unit_vectors(tle_radec_deg)
-    if horizons_unit.shape != tle_unit.shape:
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return signed JPL-minus-TLE RA and declination coordinate residuals."""
+    horizons = np.asarray(horizons_radec_deg, dtype=float)
+    tle = np.asarray(tle_radec_deg, dtype=float)
+    if horizons.shape != tle.shape:
         raise ValueError("Horizons and TLE RA/Dec arrays have different shapes.")
+    if horizons.ndim != 2 or horizons.shape[1] != 2:
+        raise ValueError("RA/Dec coordinates must have shape (samples, 2).")
 
-    cross_magnitude = np.linalg.norm(
-        np.cross(horizons_unit, tle_unit),
-        axis=1,
-    )
-    dot_product = np.clip(
-        np.einsum("ij,ij->i", horizons_unit, tle_unit),
-        -1.0,
-        1.0,
-    )
-    separation_radians = np.arctan2(cross_magnitude, dot_product)
-    return np.degrees(separation_radians) * 3600.0
+    # Wrap the RA coordinate difference into [-180, 180) degrees.  Without
+    # this, samples straddling 0/360 degrees would show a false full-circle
+    # residual instead of the small signed difference requested.
+    ra_difference_deg = (
+        (horizons[:, 0] - tle[:, 0] + 180.0) % 360.0
+    ) - 180.0
+    dec_difference_deg = horizons[:, 1] - tle[:, 1]
+    return ra_difference_deg * 3600.0, dec_difference_deg * 3600.0
 
 
 def calculate_statistics(
-    separations_arcsec: np.ndarray,
-) -> AngularSeparationStatistics:
-    """Calculate empirical angular-separation summary statistics."""
-    return AngularSeparationStatistics(
-        mean_arcsec=float(np.mean(separations_arcsec)),
-        median_arcsec=float(np.median(separations_arcsec)),
-        rms_arcsec=float(np.sqrt(np.mean(np.square(separations_arcsec)))),
-        percentile_95_arcsec=float(np.percentile(separations_arcsec, 95.0)),
-        maximum_arcsec=float(np.max(separations_arcsec)),
+    ra_residual_arcsec: np.ndarray,
+    dec_residual_arcsec: np.ndarray,
+) -> ResidualStatistics:
+    """Calculate signed residual bias, spread, and RMS for each coordinate."""
+    return ResidualStatistics(
+        ra_mean_arcsec=float(np.mean(ra_residual_arcsec)),
+        ra_standard_deviation_arcsec=float(np.std(ra_residual_arcsec)),
+        ra_rms_arcsec=float(np.sqrt(np.mean(np.square(ra_residual_arcsec)))),
+        dec_mean_arcsec=float(np.mean(dec_residual_arcsec)),
+        dec_standard_deviation_arcsec=float(np.std(dec_residual_arcsec)),
+        dec_rms_arcsec=float(np.sqrt(np.mean(np.square(dec_residual_arcsec)))),
     )
 
 
@@ -537,123 +511,111 @@ def write_comparison_plot(
     horizons_radec_deg: np.ndarray,
     tle_radec_deg: np.ndarray,
     sun_exclusion: float,
-) -> AngularSeparationStatistics:
-    """Write time-domain and histogram views of angular separation."""
-    separations_arcsec = angular_separation_arcseconds(
+) -> ResidualStatistics:
+    """Write signed RA and declination residuals versus time."""
+    ra_residual_arcsec, dec_residual_arcsec = coordinate_residuals_arcseconds(
         horizons_radec_deg,
         tle_radec_deg,
     )
-    bin_edges = histogram_bin_edges(separations_arcsec)
-    statistics = calculate_statistics(separations_arcsec)
+    statistics = calculate_statistics(
+        ra_residual_arcsec,
+        dec_residual_arcsec,
+    )
 
-    figure, (time_axis, histogram_axis) = plt.subplots(
+    figure, (ra_axis, dec_axis) = plt.subplots(
         2,
         1,
-        figsize=(14.0, 9.0),
-        gridspec_kw={"height_ratios": (1.55, 1.0)},
+        figsize=(14.0, 8.5),
+        sharex=True,
         constrained_layout=True,
     )
-    dot_color = "#176B87"
-    reference_color = "#D97706"
+    panels = (
+        (
+            ra_axis,
+            ra_residual_arcsec,
+            "#176B87",
+            statistics.ra_mean_arcsec,
+            statistics.ra_standard_deviation_arcsec,
+            statistics.ra_rms_arcsec,
+            "Right ascension residual",
+            r"$RA_{JPL}-RA_{TLE}$ (arcsec)",
+        ),
+        (
+            dec_axis,
+            dec_residual_arcsec,
+            "#7C3AED",
+            statistics.dec_mean_arcsec,
+            statistics.dec_standard_deviation_arcsec,
+            statistics.dec_rms_arcsec,
+            "Declination residual",
+            r"$Dec_{JPL}-Dec_{TLE}$ (arcsec)",
+        ),
+    )
+    for axis, residuals, color, mean, spread, rms, title, ylabel in panels:
+        axis.plot(
+            times,
+            residuals,
+            color=color,
+            linewidth=1.0,
+            alpha=0.88,
+            zorder=1,
+        )
+        axis.scatter(
+            times,
+            residuals,
+            s=7,
+            color=color,
+            alpha=0.48,
+            linewidths=0.0,
+            zorder=2,
+        )
+        axis.axhline(
+            0.0,
+            color="#111827",
+            linewidth=1.0,
+            label="Zero residual",
+            zorder=3,
+        )
+        axis.axhline(
+            mean,
+            color="#D97706",
+            linewidth=1.3,
+            linestyle="--",
+            label=f"Mean bias = {mean:.3f} arcsec",
+            zorder=3,
+        )
+        axis.set_ylabel(ylabel)
+        axis.set_title(title, loc="left", fontsize=11.5, weight="bold")
+        axis.grid(True, which="major", color="#D7DEE5", linewidth=0.8)
+        axis.grid(True, which="minor", color="#EDF1F4", linewidth=0.5)
+        axis.spines[["top", "right"]].set_visible(False)
+        axis.legend(loc="best", frameon=True, fontsize=8.5)
+        axis.text(
+            0.995,
+            0.03,
+            f"Mean: {mean:.6f} arcsec\n"
+            f"Standard deviation: {spread:.6f} arcsec\n"
+            f"RMS: {rms:.6f} arcsec",
+            transform=axis.transAxes,
+            ha="right",
+            va="bottom",
+            fontsize=8.6,
+            bbox={
+                "boxstyle": "round,pad=0.4",
+                "facecolor": "white",
+                "edgecolor": "#CBD5E1",
+                "alpha": 0.94,
+            },
+        )
 
-    time_axis.plot(
-        times,
-        separations_arcsec,
-        color=dot_color,
-        linewidth=1.0,
-        alpha=0.82,
-        zorder=1,
-    )
-    time_axis.scatter(
-        times,
-        separations_arcsec,
-        s=7,
-        color=dot_color,
-        alpha=0.55,
-        linewidths=0.0,
-        label="Great-circle position separation",
-        zorder=2,
-    )
-    time_axis.axhline(
-        statistics.mean_arcsec,
-        color=reference_color,
-        linewidth=1.3,
-        linestyle="--",
-        label=f"Mean = {statistics.mean_arcsec:.3f} arcsec",
-        zorder=3,
-    )
-    time_axis.set_ylabel("Angular separation (arcsec)")
-    time_axis.set_xlabel("Time (UTC)")
-    time_axis.set_title(
-        "GOES-18 position difference over time",
-        loc="left",
-        fontsize=11.5,
-        weight="bold",
-    )
-    time_axis.grid(True, which="major", color="#D7DEE5", linewidth=0.8)
-    time_axis.grid(True, which="minor", color="#EDF1F4", linewidth=0.5)
-    time_axis.spines[["top", "right"]].set_visible(False)
     locator = mdates.AutoDateLocator(minticks=5, maxticks=10, tz=UTC)
-    time_axis.xaxis.set_major_locator(locator)
-    time_axis.xaxis.set_major_formatter(mdates.ConciseDateFormatter(locator, tz=UTC))
-    time_axis.set_ylim(bottom=0.0)
-    time_axis.legend(loc="best", frameon=True, fontsize=8.5)
-
-    histogram_axis.hist(
-        separations_arcsec,
-        bins=bin_edges,
-        color=dot_color,
-        alpha=0.65,
-        edgecolor="white",
-        linewidth=0.7,
-        label="Angular-separation samples",
-    )
-    histogram_axis.axvline(
-        statistics.mean_arcsec,
-        color=reference_color,
-        linewidth=1.2,
-        linestyle="--",
-        label=f"Mean = {statistics.mean_arcsec:.3f} arcsec",
-    )
-    histogram_axis.set_xlabel("Great-circle angular separation (arcsec)")
-    histogram_axis.set_ylabel("Sample count")
-    histogram_axis.set_title(
-        "Distribution of GOES-18 position differences",
-        loc="left",
-        fontsize=11.5,
-        weight="bold",
-    )
-    histogram_axis.grid(True, axis="y", color="#D7DEE5", linewidth=0.8)
-    histogram_axis.spines[["top", "right"]].set_visible(False)
-    histogram_axis.legend(loc="best", frameon=True, fontsize=8.5)
-
-    statistics_text = (
-        f"Samples: {len(separations_arcsec):,}\n"
-        f"Mean: {statistics.mean_arcsec:.6f} arcsec\n"
-        f"Median: {statistics.median_arcsec:.6f} arcsec\n"
-        f"RMS: {statistics.rms_arcsec:.6f} arcsec\n"
-        f"95th percentile: {statistics.percentile_95_arcsec:.6f} arcsec\n"
-        f"Maximum: {statistics.maximum_arcsec:.6f} arcsec"
-    )
-    histogram_axis.text(
-        0.995,
-        0.97,
-        statistics_text,
-        transform=histogram_axis.transAxes,
-        ha="right",
-        va="top",
-        fontsize=8.8,
-        bbox={
-            "boxstyle": "round,pad=0.45",
-            "facecolor": "white",
-            "edgecolor": "#CBD5E1",
-            "alpha": 0.94,
-        },
-    )
+    dec_axis.xaxis.set_major_locator(locator)
+    dec_axis.xaxis.set_major_formatter(mdates.ConciseDateFormatter(locator, tz=UTC))
+    dec_axis.set_xlabel("Time (UTC)")
 
     figure.suptitle(
         "GOES-18 ephemeris algorithm comparison\n"
-        "Great-circle separation from geocentric ICRF/GCRS RA and Dec | "
+        "Signed coordinate residuals: JPL Horizons minus TLE/SGP4 | "
         f"{times[0]:%Y-%m-%d %H:%M} to {times[-1]:%Y-%m-%d %H:%M} UTC",
         x=0.07,
         ha="left",
@@ -706,22 +668,28 @@ def main() -> int:
     print("\nAlgorithm comparison complete")
     print(f"Matched samples: {len(times):,}")
     print(
-        "Difference definition: great-circle separation between the "
-        "JPL Horizons and TLE/SGP4 GOES-18 RA/Dec directions"
-    )
-    print(f"Mean angular separation: {statistics.mean_arcsec:.9f} arcsec")
-    print(
-        f"Median angular separation: {statistics.median_arcsec:.9f} arcsec"
+        "Difference convention: JPL Horizons minus TLE/SGP4; RA is wrapped "
+        "across the 0/360-degree boundary"
     )
     print(
-        f"RMS angular separation: {statistics.rms_arcsec:.9f} arcsec"
+        f"RA mean bias: {statistics.ra_mean_arcsec:.9f} arcsec"
     )
     print(
-        "95th-percentile angular separation: "
-        f"{statistics.percentile_95_arcsec:.9f} arcsec"
+        "RA standard deviation: "
+        f"{statistics.ra_standard_deviation_arcsec:.9f} arcsec"
     )
     print(
-        f"Maximum angular separation: {statistics.maximum_arcsec:.9f} arcsec"
+        f"RA RMS residual: {statistics.ra_rms_arcsec:.9f} arcsec"
+    )
+    print(
+        f"Declination mean bias: {statistics.dec_mean_arcsec:.9f} arcsec"
+    )
+    print(
+        "Declination standard deviation: "
+        f"{statistics.dec_standard_deviation_arcsec:.9f} arcsec"
+    )
+    print(
+        f"Declination RMS residual: {statistics.dec_rms_arcsec:.9f} arcsec"
     )
     print(f"Wrote comparison PNG: {output}")
     return 0
