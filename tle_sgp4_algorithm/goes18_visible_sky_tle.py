@@ -1,18 +1,23 @@
 #!/usr/bin/env python3
-"""Calculate GOES-18 sky visibility from a TLE instead of JPL Horizons.
+"""Calculate GOES-18 sky visibility with a TLE/SGP4 spacecraft trajectory.
 
-GOES-18 is propagated locally with the standard SGP4 model.  The SGP4 TEME
-position is transformed to GCRS with Astropy, and Astropy's built-in solar-
-system ephemeris supplies geocentric Moon and Sun positions.  No JPL Horizons
-query or downloaded SPK/BSP kernel is used.  When Space-Track credentials are
-configured, the program downloads GP_HISTORY records around the requested
-dates and propagates every sample with the nearest TLE epoch.  Otherwise it
-uses CelesTrak's latest TLE and retains the bundled element set as an offline
-fallback.
+GOES-18 is propagated locally with the standard SGP4 model and the SGP4 TEME
+position is transformed to GCRS with Astropy.  By default, matching geometric
+ICRF Moon and Sun vectors are downloaded from JPL Horizons with Earth's center
+as the observer.  Subtracting the TLE/SGP4 GOES-18 position produces the
+observer-relative vectors used by the visibility calculation.  This keeps the
+solar-system model aligned with the Horizons algorithm while preserving the
+TLE/SGP4 spacecraft trajectory that the comparison is intended to test.
+
+An Astropy built-in Moon/Sun ephemeris remains available as an explicitly
+selected offline option.  When Space-Track credentials are configured, the
+program downloads GP_HISTORY records around the requested dates and propagates
+every sample with the nearest TLE epoch.  Otherwise it uses CelesTrak's latest
+TLE and retains the bundled element set as an offline fallback.
 
 This file reuses the tested spherical-cap geometry, adaptive angular sampling,
 CSV writer, and plot writer from ``goes18_visible_sky.py``.  Keep both Python
-files in the same directory.
+algorithm folders in the same repository.
 """
 
 from __future__ import annotations
@@ -55,8 +60,12 @@ if str(PROJECT_ROOT) not in sys.path:
 from horizons_api_algorithm.goes18_visible_sky import (
     ANGULAR_FINE_LIMITS_DEG,
     DEFAULT_EXPOSURE_SKY_POINTS,
+    EARTH_ID,
+    MOON_ID,
+    SUN_ID,
     adaptive_sample_indices,
     compute_visible_sky,
+    fetch_vectors,
     prompt_for_date,
     prompt_for_sun_exclusion,
     step_to_minutes,
@@ -83,6 +92,7 @@ DEFAULT_MAX_TLE_AGE_DAYS = 14.0
 DEFAULT_FALLBACK_TLE_FILE = Path(__file__).with_name("goes18_2026-08-27.tle")
 DEFAULT_TLE_CACHE_DIR = Path(__file__).with_name("tle_cache")
 HISTORICAL_QUERY_PADDING_DAYS = 7
+HORIZONS_BODY_BATCH_SAMPLES = 9000
 
 
 @dataclass(frozen=True)
@@ -421,18 +431,90 @@ def enforce_tle_age_limit(
     return maximum_age
 
 
+def fetch_horizons_geocentric_ephemeris(
+    datetimes: list[datetime],
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return geometric geocentric Moon and Sun ICRF vectors from Horizons.
+
+    Horizons limits the number of rows returned by one request.  Split long
+    five-minute grids into non-overlapping batches and verify that every
+    returned Julian date matches the requested UTC grid before concatenating
+    the vectors.
+    """
+    if not datetimes:
+        raise ValueError("At least one datetime is required.")
+
+    requested_jd = np.asarray(Time(datetimes, scale="utc").utc.jd, dtype=float)
+    moon_chunks: list[np.ndarray] = []
+    sun_chunks: list[np.ndarray] = []
+    start_index = 0
+
+    while start_index < len(datetimes):
+        stop_index = min(
+            start_index + HORIZONS_BODY_BATCH_SAMPLES,
+            len(datetimes),
+        )
+        # A one-row Horizons request has identical start and stop times and is
+        # rejected. Include a one-sample remainder in the preceding batch.
+        if len(datetimes) - stop_index == 1:
+            stop_index = len(datetimes)
+
+        batch = datetimes[start_index:stop_index]
+        start_label = batch[0].strftime("%Y-%m-%d %H:%M:%S")
+        stop_label = batch[-1].strftime("%Y-%m-%d %H:%M:%S")
+        expected_jd = requested_jd[start_index:stop_index]
+
+        moon_jd, _, moon_vectors, _ = fetch_vectors(
+            MOON_ID,
+            EARTH_ID,
+            start_label,
+            stop_label,
+            "5 min",
+        )
+        sun_jd, _, sun_vectors, _ = fetch_vectors(
+            SUN_ID,
+            EARTH_ID,
+            start_label,
+            stop_label,
+            "5 min",
+        )
+
+        for body_name, returned_jd in (
+            ("Moon", moon_jd),
+            ("Sun", sun_jd),
+        ):
+            if returned_jd.shape != expected_jd.shape or not np.allclose(
+                returned_jd,
+                expected_jd,
+                rtol=0.0,
+                atol=1.0e-7,
+            ):
+                raise RuntimeError(
+                    f"Horizons {body_name} time grid does not match the "
+                    "requested five-minute UTC grid."
+                )
+
+        moon_chunks.append(np.asarray(moon_vectors, dtype=float))
+        sun_chunks.append(np.asarray(sun_vectors, dtype=float))
+        start_index = stop_index
+
+    return np.vstack(moon_chunks), np.vstack(sun_chunks)
+
+
 def propagate_tle_ephemeris(
     datetimes: list[datetime],
     satellites: list[Satrec],
     selected_tle_indices: np.ndarray,
+    body_ephemeris: str = "horizons",
 ) -> dict[str, np.ndarray | Time]:
     """Generate GOES-18 and Earth/Moon/Sun vectors on the UTC time grid.
 
     SGP4 returns GOES-18 coordinates in TEME.  Astropy converts the spacecraft
-    position to GCRS, and its built-in ephemeris supplies GCRS positions for
-    the Moon and Sun relative to Earth's center.  Subtracting the GOES-18 GCRS
-    position produces the three observer-relative vectors used by the sky
-    geometry calculation.
+    position to GCRS.  By default, Horizons supplies matching geometric ICRF
+    Moon and Sun positions relative to Earth's center; ``astropy-builtin`` is
+    available for offline operation.  Subtracting the GOES-18 position from
+    those geocentric vectors produces the observer-relative vectors used by
+    the sky geometry calculation.
     """
     times = Time(datetimes, scale="utc")
     sample_count = len(datetimes)
@@ -479,11 +561,24 @@ def propagate_tle_ephemeris(
         goes_gcrs = teme_coordinates.transform_to(GCRS(obstime=times))
     goes_gcrs_km = goes_gcrs.cartesian.xyz.to_value(u.km).T
 
-    # The built-in ephemeris uses analytical solar-system models and requires
-    # no Horizons call and no downloaded JPL BSP/SPK kernel.
-    with solar_system_ephemeris.set("builtin"):
-        moon_geocentric_km = get_body("moon", times).cartesian.xyz.to_value(u.km).T
-        sun_geocentric_km = get_body("sun", times).cartesian.xyz.to_value(u.km).T
+    if body_ephemeris == "horizons":
+        moon_geocentric_km, sun_geocentric_km = (
+            fetch_horizons_geocentric_ephemeris(datetimes)
+        )
+    elif body_ephemeris == "astropy-builtin":
+        # This analytical ephemeris requires no Horizons call and no
+        # downloaded JPL BSP/SPK kernel, but it is not the matched-model mode.
+        with solar_system_ephemeris.set("builtin"):
+            moon_geocentric_km = (
+                get_body("moon", times).cartesian.xyz.to_value(u.km).T
+            )
+            sun_geocentric_km = (
+                get_body("sun", times).cartesian.xyz.to_value(u.km).T
+            )
+    else:
+        raise ValueError(
+            "body_ephemeris must be 'horizons' or 'astropy-builtin'."
+        )
 
     earth_from_goes_km = -goes_gcrs_km
     moon_from_goes_km = moon_geocentric_km - goes_gcrs_km
@@ -590,8 +685,8 @@ def write_ephemeris_csv(
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Calculate GOES-18 visible sky using a TLE, SGP4, and Astropy's "
-            "built-in solar-system ephemeris; JPL Horizons is not queried."
+            "Calculate GOES-18 visible sky using a TLE/SGP4 spacecraft "
+            "trajectory and JPL Horizons Earth/Moon/Sun ephemerides."
         )
     )
     parser.add_argument(
@@ -665,6 +760,15 @@ def parse_arguments() -> argparse.Namespace:
         help=(
             "Allow propagation beyond --max-tle-age. This is intended only "
             "for diagnostics and can produce inaccurate comparisons."
+        ),
+    )
+    parser.add_argument(
+        "--body-ephemeris",
+        choices=("horizons", "astropy-builtin"),
+        default="horizons",
+        help=(
+            "Geocentric Moon/Sun model. 'horizons' matches the JPL algorithm "
+            "(default); 'astropy-builtin' is an offline analytical fallback"
         ),
     )
     parser.add_argument(
@@ -760,14 +864,21 @@ def main() -> None:
         args.allow_stale_tle,
     )
 
-    print(
-        "Propagating GOES-18 with the nearest available TLE at each sample "
-        "and generating Moon/Sun ephemerides..."
-    )
+    if args.body_ephemeris == "horizons":
+        print(
+            "Propagating GOES-18 with TLE/SGP4 and downloading matching "
+            "geometric Moon/Sun vectors from JPL Horizons..."
+        )
+    else:
+        print(
+            "Propagating GOES-18 with TLE/SGP4 and generating Moon/Sun "
+            "vectors with Astropy's offline built-in ephemeris..."
+        )
     ephemeris = propagate_tle_ephemeris(
         datetimes,
         satellites,
         selected_tle_indices,
+        args.body_ephemeris,
     )
     earth_vectors = np.asarray(ephemeris["earth_from_goes_km"])
     moon_vectors = np.asarray(ephemeris["moon_from_goes_km"])
@@ -873,6 +984,14 @@ def main() -> None:
     percent = 100.0 * fraction
     print(f"TLE source: {tle_source}")
     print(f"TLE object: GOES 18 (NORAD {GOES18_NORAD_ID})")
+    print(
+        "Earth/Moon/Sun model: "
+        + (
+            "JPL Horizons geometric ICRF vectors"
+            if args.body_ephemeris == "horizons"
+            else "Astropy built-in analytical ephemeris (offline mode)"
+        )
+    )
     print(f"TLE records downloaded/loaded: {len(records)}")
     print(f"TLE records actually used: {len(used_records)}")
     print(f"Used TLE epoch range: {first_epoch_label} through {last_epoch_label}")
