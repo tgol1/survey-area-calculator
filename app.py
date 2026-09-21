@@ -659,7 +659,7 @@ st.caption(
 with st.expander("About", expanded=True):
     st.markdown(
         """
-        This project calculates the instantaneous fraction of the celestial sky
+        Developed for MIT Kavli Institute, this tool calculates the instantaneous fraction of the celestial sky
         available to an observer on GOES-18 after applying Earth, Moon, and Sun
         exclusion regions. It supports a NASA/JPL Horizons method, a local
         TLE/SGP4 method, and a direct comparison of the GOES-18 ephemeris
@@ -668,6 +668,8 @@ with st.expander("About", expanded=True):
         The Earth clearance is measured 20° beyond the Earth limb, the Moon
         clearance is 20° from its center by default, and the selectable Sun
         exclusion radius is 30° or 45°.
+
+        Changelog data, usage instructions (README), and sky-projection documentation are available in the tabs below.
         """
     )
 
@@ -889,9 +891,8 @@ with method_tabs[3]:
         "individual UTC days, while thick lines show each window's hourly mean."
     )
     st.info(
-        "Every manually entered window must be exactly 14 days. The website "
-        "and the calculation script both reject a window whose end date is not "
-        "exactly 14 days after its start date. The end date is an exclusive boundary."
+        "Every manually entered window must be exactly 14 days. Any date range "
+        "that is more or less than exactly 14 days will be rejected."
     )
 
     daily_selection_label = st.radio(

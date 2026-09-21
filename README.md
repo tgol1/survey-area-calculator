@@ -1,7 +1,7 @@
-## Survey Area Calculator v4.1
+## Survey Area Calculator v5
 George Tolis
 
-Last updated: 20 September 2026
+Last updated: 21 September 2026
 
 ## Changelog
 Every new version number represents completion of additional assignments for project.
@@ -49,6 +49,11 @@ v4.1 - 20 September 2026
 - Added Aitoff-Mollweide projections to webstie
 - Added background to website
 
+v5 - 21 September 2026
+- Algorithm comparsion now plots difference in RA (JPL) versus RA (TLE) and Declination.
+- Updated "Algorithm Comparison" section of README to reflect above changes.
+- Quality of life changes throughout README and website.
+
 ## Function
 Script computes the instantaneous visible fraction of sky from GOES-18 - a satellite positioned at 137W around Hawaii.
 
@@ -63,51 +68,6 @@ fraction of sky depends only on cap sizes and Earth-Moon-Sun angular separation.
 
 Minimum fractions of visible sky represent minimum visibility; earth, moon and sun exclusion regions do not overlap and both
 independently block portions of the sky. Likewise, maximum fractions of visible sky represent maximum visibility; earth, moon and sun have minimal center-to-center separation. Plateaus at minimum visibility represent the duration that the Earth, Moon and Sun exclusion regions are completely separated.
-
-## Algorithm Comparison
-
-The compare_algorithms.py script compares the RA declination results produced by the NASA/JPL Horizons and TLE/SGP4 algorithms. It runs both methods using the same date range, sampling interval, and Sun-exclusion angle, then matches their output values at common UTC timestamps.
-
-The difference is calculated as:
-
-The angular difference between the two satellite directions is calculated as:
-
-$$
-\Delta\theta =
-\cos^{-1}\left[
-\sin(\delta_H)\sin(\delta_T)
-+
-\cos(\delta_H)\cos(\delta_T)
-\cos(\alpha_H-\alpha_T)
-\right]
-$$
-
-where:
-
-- $\alpha_H$ and $\delta_H$ are the JPL Horizons right ascension and declination.
-- $\alpha_T$ and $\delta_T$ are the TLE/SGP4 right ascension and declination.
-
-The result is converted from radians to arcseconds using:
-
-$$
-\Delta\theta_{\mathrm{arcsec}}
-=
-\Delta\theta_{\mathrm{rad}}
-\left(\frac{180}{\pi}\right)
-(3600)
-$$
-
-The generated PNG contains two panels:
-
-A time-domain dot plot showing how the difference between the two algorithms changes over time.
-A normalized histogram showing the distribution of those differences, with a Gaussian curve based on the sample mean and standard deviation.
-
-A mean difference near zero indicates little systematic bias between the algorithms. The standard deviation, (\sigma), describes the empirical spread of RA declinations and can be reported as the approximate one-standard-deviation computational disagreement. For example, (\sigma = 0.0072) percentage points means the two methods typically differ by approximately (0.0072) percentage points in calculated visible-sky coverage.
-
-The histogram may not be perfectly Gaussian. Visible-sky plateaus can produce many differences close to zero, while orbital motion can create periodic or clustered residuals. Therefore, the Gaussian width should be interpreted as the spread of the visible-sky differences over the selected interval, rather than as a direct measurement of the satellite’s positional error in kilometers.
-
-For a meaningful comparison, the selected date range should be close to the epoch of the TLE being used. Propagating a TLE far from its epoch can introduce large, structured errors that do not represent the normal short-term accuracy of SGP4. The TLE included is from 27 August 2026.
-
 
 ## How to Use
 - Input date range as prompted in YYYY-MM-DD format.
@@ -135,4 +95,61 @@ python -m pip install -r requirements.txt
 
 The script also uses Python standard-library modules including `argparse`, `csv`, `datetime`, `json`, `math`, `pathlib`, and `urllib`. These are included with Python and do not require separate installation.
 
+## Algorithm Comparison
+
+The algorithm-comparison workflow runs the JPL Horizons and TLE/SGP4 methods over the same user-selected date range, Sun exclusion angle, and uniform five-minute time grid. It then compares the geocentric right ascension and declination of GOES-18 produced by each method.
+
+The comparison uses the signed convention:
+
+```text
+JPL Horizons minus TLE/SGP4
+```
+
+The right-ascension residual is:
+
+```text
+ΔRA = wrap(RA_JPL - RA_TLE) × 3600 arcseconds/degree
+```
+
+The `wrap` operation restricts the difference to the interval from −180° to +180°. This prevents a false 360° residual when one right ascension is slightly below 360° and the other is slightly above 0°.
+
+The declination residual is:
+
+```text
+ΔDec = (Dec_JPL - Dec_TLE) × 3600 arcseconds/degree
+```
+
+The plotted right-ascension value is the raw RA coordinate difference requested for this comparison. It is not multiplied by `cos(Dec)`.
+
+### Earth Models and Interpreting the Residuals
+
+The TLE/SGP4 method uses the WGS-72 constants associated with standard TLE propagation. This is not a spherical point-mass Earth model. It includes the nonspherical zonal gravity coefficients `J2`, `J3`, and `J4`, along with SGP4’s deep-space solar, lunar, and resonance terms for geosynchronous satellites.
+
+Horizons does not expose a specific Earth gravity model for the GOES-18 trajectory in its API response. Instead, it interpolates a precomputed spacecraft trajectory supplied to the Horizons system. JPL notes that spacecraft trajectories supplied by navigation teams may include extended spherical-harmonic gravity fields, solar and lunar perturbations, solar-radiation pressure, thruster firings, station-keeping maneuvers, and tracking-data orbit determination. Horizons spacecraft data can also originate from TLE-based trajectories, so the exact force model used for the GOES-18 record cannot be confirmed from the public output alone.
+
+Both visible-sky algorithms use the same spherical mean Earth radius for the Earth-limb exclusion calculation:
+
+```text
+Earth mean radius = 6371.0084 km
+```
+
+Consequently, the Earth exclusion-cap geometry is identical in both methods. Differences in that shared radius do not produce the RA and declination residuals.
+
+Random scatter centered around zero would suggest that the remaining differences are predominantly uncorrelated noise. Smooth curves, periodic oscillations, or long-term drift indicate a systematic difference between the two trajectory solutions.
+
+Continuous residual patterns can result from:
+
+* Differences between TLE mean elements and the operational spacecraft trajectory
+* SGP4’s simplified WGS-72 gravity representation
+* Higher-order Earth gravity terms in the Horizons trajectory
+* Solar and lunar perturbation approximations
+* Solar-radiation pressure
+* GOES-18 station-keeping maneuvers
+* TLE fitting and epoch errors
+* TEME-to-GCRS reference-frame transformations
+* Earth-orientation and time-system differences
+
+Because both propagation methods are deterministic, smooth residual curves do not necessarily indicate a programming error. They commonly indicate that the two methods use different orbit fits, force models, reference-frame transformations, or maneuver information.
+
+For a meaningful comparison, the TLE method requires a historical TLE close to every requested time. By default, the script rejects samples more than 14 days from the nearest available TLE epoch rather than generating a potentially misleading comparison.
 
