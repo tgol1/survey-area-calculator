@@ -70,11 +70,32 @@ The compare_algorithms.py script compares the RA declination results produced by
 
 The difference is calculated as:
 
-[
-\text{Difference} =
-\text{Horizons RA declination} -
-\text{TLE/SGP4 RA declination}
-]
+The angular difference between the two satellite directions is calculated as:
+
+$$
+\Delta\theta =
+\cos^{-1}\left[
+\sin(\delta_H)\sin(\delta_T)
++
+\cos(\delta_H)\cos(\delta_T)
+\cos(\alpha_H-\alpha_T)
+\right]
+$$
+
+where:
+
+- $\alpha_H$ and $\delta_H$ are the JPL Horizons right ascension and declination.
+- $\alpha_T$ and $\delta_T$ are the TLE/SGP4 right ascension and declination.
+
+The result is converted from radians to arcseconds using:
+
+$$
+\Delta\theta_{\mathrm{arcsec}}
+=
+\Delta\theta_{\mathrm{rad}}
+\left(\frac{180}{\pi}\right)
+(3600)
+$$
 
 The generated PNG contains two panels:
 
