@@ -94,16 +94,34 @@ def set_background(image_path: Path) -> None:
         [data-testid="stAppViewContainer"] h2,
         [data-testid="stAppViewContainer"] h3,
         [data-testid="stAppViewContainer"] h4,
+        [data-testid="stAppViewContainer"] h5,
+        [data-testid="stAppViewContainer"] h6,
         [data-testid="stAppViewContainer"] .stMarkdown p,
         [data-testid="stAppViewContainer"] .stMarkdown li,
+        [data-testid="stAppViewContainer"] .stMarkdown blockquote,
+        [data-testid="stCaptionContainer"] p,
         [data-testid="stWidgetLabel"] p {{
             color: #f8fafc;
             text-shadow: 0 1px 3px rgba(0, 0, 0, 0.75);
+            background-color: rgba(0, 0, 0, 0.88);
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            border-radius: 6px;
+            box-shadow: 0 3px 10px rgba(0, 0, 0, 0.28);
+            box-decoration-break: clone;
+            -webkit-box-decoration-break: clone;
+            display: block;
+            width: fit-content;
+            max-width: 100%;
+            padding: 0.22rem 0.5rem;
+        }}
+
+        [data-testid="stAppViewContainer"] .stMarkdown a {{
+            color: #93c5fd;
         }}
 
         [data-testid="stForm"],
         [data-testid="stExpander"] {{
-            background-color: rgba(15, 23, 42, 0.76);
+            background-color: rgba(0, 0, 0, 0.84);
             border: 1px solid rgba(255, 255, 255, 0.22);
             border-radius: 12px;
             box-shadow: 0 8px 24px rgba(0, 0, 0, 0.22);
@@ -120,7 +138,7 @@ def set_background(image_path: Path) -> None:
         }}
 
         [data-testid="stMetric"] {{
-            background-color: rgba(15, 23, 42, 0.78);
+            background-color: rgba(0, 0, 0, 0.86);
             border: 1px solid rgba(255, 255, 255, 0.18);
             border-radius: 10px;
             padding: 0.75rem;
