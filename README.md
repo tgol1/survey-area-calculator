@@ -54,6 +54,9 @@ v5 - 21 September 2026
 - Updated "Algorithm Comparison" section of README to reflect above changes.
 - Quality of life changes throughout README and website.
 
+v5.1 - 27 September 2026
+- Updated Aitoff-Molewide projection
+
 ## Function
 Script computes the instantaneous visible fraction of sky from GOES-18 - a satellite positioned at 137W around Hawaii.
 
