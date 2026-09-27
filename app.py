@@ -35,7 +35,7 @@ DAILY_VARIATION_SCRIPT = (
     / "twoweektrial_comparison"
     / "goes18_twoweektrialcomparison.py"
 )
-COMBINED_PROJECTION_PATH = (
+DAILY_COVERAGE_PROJECTION_PATH = (
     PROJECT_ROOT
     / "sky_projection"
     / "goes18_aitoff_mollweide_projection.png"
@@ -706,34 +706,35 @@ with reference_tabs[0]:
 
 
 with reference_tabs[1]:
-    st.markdown("### GOES-18 Aitoff–Mollweide visible-sky projection")
+    st.markdown("### GOES-18 daily sky-survey coverage")
     st.markdown(
-        "This figure shows four example instants from the point of view of "
-        "GOES-18, using both Aitoff and Mollweide projections of the same "
-        "satellite-centered celestial sphere."
+        "Each Mollweide panel combines one complete UTC day of five-minute "
+        "JPL Horizons samples. Every map location is colored by the total "
+        "time that direction remains outside the moving Earth, Moon, and Sun "
+        "exclusion regions."
     )
 
-    if COMBINED_PROJECTION_PATH.is_file():
-        projection_bytes = COMBINED_PROJECTION_PATH.read_bytes()
+    if DAILY_COVERAGE_PROJECTION_PATH.is_file():
+        projection_bytes = DAILY_COVERAGE_PROJECTION_PATH.read_bytes()
         st.image(
             projection_bytes,
             caption=(
-                "Earth, Moon, and Sun exclusion regions as viewed from "
-                "GOES-18. Aitoff examples are shown first and Mollweide "
-                "examples are shown below."
+                "Daily unobscured observing time from GOES-18. All panels use "
+                "the same 0–24 hour color scale so successive days can be "
+                "compared directly."
             ),
             use_container_width=True,
         )
         st.download_button(
-            "Download projection PNG",
+            "Download daily coverage PNG",
             data=projection_bytes,
             file_name="goes18_aitoff_mollweide_projection.png",
             mime="image/png",
-            key="download_static_projection",
+            key="download_daily_coverage_projection",
         )
     else:
         st.error(
-            "The projection image was not found. Add "
+            "The daily coverage image was not found. Add "
             "`sky_projection/goes18_aitoff_mollweide_projection.png` "
             "to the deployed repository branch."
         )
@@ -742,45 +743,63 @@ with reference_tabs[1]:
         """
         #### How to read the figure
 
-        - **Unshaded sky** is available for observation. **Blue**, **gray**,
-          and **orange** represent the Earth, Moon, and Sun exclusion regions.
-          Blended colors show overlapping exclusion regions; overlap is counted
-          only once when calculating the visible fraction.
-        - The **dark-blue inner disk** is Earth's apparent physical disk. The
-          larger translucent blue cap includes the required 20° clearance
-          beyond Earth's limb. The Moon and Sun center markers are schematic
-          because their physical disks are less than one degree across, while
-          their avoidance regions are much larger.
-        - Each panel title gives the UTC instant, selected Sun exclusion angle,
-          Earth exclusion radius, and resulting visible-sky percentage.
+        - **Each panel represents one full UTC day**, rather than one
+          instantaneous geometry. At five-minute intervals, every fixed sky
+          direction is tested against the Earth, Moon, and Sun exclusion caps.
+        - The color of a pixel gives its **total unobscured observing time out
+          of 24 hours**. Purple and blue indicate little available time;
+          cyan and green indicate intermediate coverage; yellow, orange, and
+          red indicate progressively longer coverage.
+        - **0 hours** means the direction is inside at least one exclusion cap
+          at every sampled time. **24 hours** means it remains outside all
+          three caps for the entire sampled day. An intermediate value is the
+          sum of all available five-minute intervals and is not necessarily one
+          continuous observing window.
+        - White contour lines mark approximately **6, 12, and 18 hours** of
+          access. The color bar is fixed from 0 to 24 hours for every panel,
+          allowing direct comparisons between successive days.
+        - The **blue, light-gray, and orange tracks** show the apparent center
+          paths of Earth, Moon, and Sun. The circular marker identifies the
+          beginning of each UTC day. The caps themselves are not drawn at one
+          instant because their motion has already been accumulated into the
+          coverage colors.
+        - **Sky-mean access** is the solid-angle-weighted average number of
+          available hours over the entire celestial sphere. **Continuous 24 h
+          access** is the percentage of the full sky that remains unobscured
+          at every sample during that day.
         - Right ascension is labeled in hours and increases toward the left,
-          following astronomical sky-map convention. The two horizontal edges
-          meet at the same celestial seam, so a cap shown on both edges is one
-          continuous region.
+          following astronomical sky-map convention. The two outer edges meet
+          at the same celestial seam.
 
         #### The satellite's point of view
 
         Imagine GOES-18 at the center of a transparent sphere, looking outward
         in every direction. The map is the inside surface of that celestial
         sphere flattened into two dimensions. GOES-18 is therefore not shown
-        as a point—it is the observer at the origin. The Earth, Moon, and Sun
-        markers indicate the directions in which those bodies appear from the
+        as a point—it is the observer at the origin. Every pixel corresponds
+        to one fixed right-ascension and declination direction as seen from the
         spacecraft.
 
         GOES-18 remains near its geostationary longitude, but its position and
         the Earth-pointing direction rotate in an inertial celestial frame.
-        Meanwhile, the Moon and Sun directions change with time. These changes
-        move the exclusion caps and alter how much they overlap, producing the
-        different visible-sky percentages shown in the four examples.
+        During each day, the Earth exclusion cap sweeps around the sky while
+        the apparent Moon and Sun directions also change. A pixel accumulates
+        observing time only while none of those moving caps covers it. The
+        Moon and Sun geometry changes from one date to the next, which is why
+        the daily intensity pattern evolves across the panels.
 
-        #### Why show both projections?
+        #### Why use a Mollweide projection?
 
-        The **Aitoff projection** provides a familiar whole-sky view with a
-        useful balance of shape and scale. The **Mollweide projection is
-        equal-area**, so the relative shaded areas more directly represent
-        excluded solid angle. Both flatten a sphere, so exclusion caps can look
-        stretched near the outer edges even though their true angular radii do
-        not change.
+        The **Mollweide projection is equal-area**, so equal areas on the image
+        represent equal solid angles on the celestial sphere. This makes the
+        sizes of low- and high-coverage regions visually meaningful. As with
+        every flat sky map, shapes become distorted near the outer seam even
+        though the underlying angular exclusion radii do not change.
+
+        The calculation applies a 20° clearance beyond the apparent Earth
+        limb, a 20° Moon-center exclusion, and the selected 30° or 45°
+        Sun-center exclusion. Five-minute sampling means reported access time
+        is quantized in five-minute increments.
         """
     )
 
