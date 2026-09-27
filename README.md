@@ -1,7 +1,7 @@
-## Survey Area Calculator v5
+## Survey Area Calculator v5.1
 George Tolis
 
-Last updated: 21 September 2026
+Last updated: 27 September 2026
 
 ## Changelog
 Every new version number represents completion of additional assignments for project.
