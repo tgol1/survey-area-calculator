@@ -1,7 +1,7 @@
-## Survey Area Calculator v5.1
+## Survey Area Calculator v5.2
 George Tolis
 
-Last updated: 27 September 2026
+Last updated: 28 September 2026
 
 ## Changelog
 Every new version number represents completion of additional assignments for project.
@@ -56,6 +56,11 @@ v5 - 21 September 2026
 
 v5.1 - 27 September 2026
 - Updated Aitoff-Molewide projection
+
+v5.2 - 28 September 2026
+- Added an interactive 24-hour sky-survey planning tool to the Sky Projection Guide.
+- Added user inputs for camera-center right ascension and declination.
+- Added a spherical 24° × 24° TESS-like camera footprint to the Mollweide projection.
 
 ## Function
 Script computes the instantaneous visible fraction of sky from GOES-18 - a satellite positioned at 137W around Hawaii.
