@@ -16,7 +16,8 @@ the Mollweide seam.
 from __future__ import annotations
 
 import argparse
-from datetime import date, datetime, timedelta
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta, timezone
 import math
 from pathlib import Path
 import sys
@@ -29,6 +30,11 @@ import numpy as np
 
 
 SCRIPT_DIRECTORY = Path(__file__).resolve().parent
+PROJECT_ROOT = SCRIPT_DIRECTORY.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+UTC = timezone.utc
 DEFAULT_OUTPUT = SCRIPT_DIRECTORY / "goes18_daily_camera_projection.png"
 CAMERA_COLOR = "#FF2D95"
 TRACK_COLORS = {
@@ -38,21 +44,31 @@ TRACK_COLORS = {
 }
 
 try:
-    from goes18_daily_survey_coverage import (
+    from horizons_api_algorithm.goes18_visible_sky import (
+        EARTH_ID,
+        EARTH_MEAN_RADIUS_KM,
         GOES18_SPK_ID,
-        daily_coverage_map,
-        fetch_ephemeris,
-        normalize_rows,
-        sky_grid,
-        solid_angle_fraction,
-        solid_angle_weighted_mean,
-        vectors_to_plot_track,
+        MOON_ID,
+        SUN_ID,
+        fetch_vectors,
+        horizons_calendar_to_utc,
     )
 except ModuleNotFoundError as exc:
     raise SystemExit(
-        "Could not import goes18_daily_survey_coverage.py. Place this script "
-        "beside it in the repository's sky_projection folder."
+        "Could not import horizons_api_algorithm.goes18_visible_sky. Place "
+        "this script in the repository's sky_projection folder."
     ) from exc
+
+
+@dataclass(frozen=True)
+class Ephemeris:
+    """Time-matched GOES-18-centered body vectors."""
+
+    times: tuple[datetime, ...]
+    earth_vectors_km: np.ndarray
+    moon_vectors_km: np.ndarray
+    sun_vectors_km: np.ndarray
+    observer_name: str
 
 
 def parse_date(value: str) -> date:
@@ -226,6 +242,176 @@ def validate_arguments(
     if args.dpi < 72:
         raise ValueError("--dpi must be at least 72.")
     return start_date, sun_exclusion, camera_ra % 360.0, camera_dec
+
+
+def fetch_ephemeris(
+    start_date: date,
+    days: int,
+    step_minutes: int,
+    observer_spk: int,
+) -> Ephemeris:
+    """Download matching Earth, Moon, and Sun vectors from JPL Horizons."""
+    start_datetime = datetime.combine(start_date, datetime.min.time(), tzinfo=UTC)
+    stop_datetime = start_datetime + timedelta(days=days)
+    start_text = start_datetime.strftime("%Y-%m-%d %H:%M")
+    stop_text = stop_datetime.strftime("%Y-%m-%d %H:%M")
+    step_text = f"{step_minutes} min"
+
+    fetched: dict[str, tuple[np.ndarray, list[str], np.ndarray, str]] = {}
+    for body_name, target_id in (
+        ("Earth", EARTH_ID),
+        ("Moon", MOON_ID),
+        ("Sun", SUN_ID),
+    ):
+        print(
+            f"Downloading {body_name} vectors from JPL Horizons "
+            f"({start_date} through {stop_datetime.date()})..."
+        )
+        fetched[body_name] = fetch_vectors(
+            target_id,
+            observer_spk,
+            start_text,
+            stop_text,
+            step_text,
+        )
+
+    earth_jd, earth_calendar, earth_vectors, observer_name = fetched["Earth"]
+    for body_name in ("Moon", "Sun"):
+        body_jd, body_calendar, _, body_observer = fetched[body_name]
+        if earth_jd.shape != body_jd.shape or not np.allclose(
+            earth_jd, body_jd, rtol=0.0, atol=1e-9
+        ):
+            raise RuntimeError(f"Earth and {body_name} time grids do not match.")
+        if earth_calendar != body_calendar:
+            raise RuntimeError(
+                f"Earth and {body_name} calendar labels do not match."
+            )
+        if observer_name != body_observer:
+            raise RuntimeError(f"Earth and {body_name} observers do not match.")
+
+    times = tuple(horizons_calendar_to_utc(value) for value in earth_calendar)
+    expected_samples = days * (1440 // step_minutes) + 1
+    if len(times) != expected_samples:
+        raise RuntimeError(
+            f"Horizons returned {len(times)} samples; expected {expected_samples}."
+        )
+    if observer_spk == GOES18_SPK_ID and "GOES-18" not in observer_name:
+        raise RuntimeError(
+            f"SPK {GOES18_SPK_ID} did not resolve to GOES-18: {observer_name}"
+        )
+    return Ephemeris(
+        times=times,
+        earth_vectors_km=earth_vectors,
+        moon_vectors_km=fetched["Moon"][2],
+        sun_vectors_km=fetched["Sun"][2],
+        observer_name=observer_name,
+    )
+
+
+def sky_grid(
+    longitude_points: int,
+    latitude_points: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return RA-left Mollweide coordinates and flattened ICRF unit vectors."""
+    longitudes = np.linspace(-math.pi, math.pi, longitude_points)
+    latitudes = np.linspace(-math.pi / 2.0, math.pi / 2.0, latitude_points)
+    longitude_grid, latitude_grid = np.meshgrid(longitudes, latitudes)
+    right_ascension = -longitude_grid
+    cos_dec = np.cos(latitude_grid)
+    vectors = np.stack(
+        (
+            cos_dec * np.cos(right_ascension),
+            cos_dec * np.sin(right_ascension),
+            np.sin(latitude_grid),
+        ),
+        axis=-1,
+    )
+    return (
+        longitude_grid,
+        latitude_grid,
+        np.asarray(vectors.reshape(-1, 3), dtype=np.float32),
+    )
+
+
+def normalize_rows(vectors: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Normalize a vector table and return unit vectors and distances."""
+    array = np.asarray(vectors, dtype=float)
+    distances = np.linalg.norm(array, axis=1)
+    if np.any(distances == 0.0) or not np.all(np.isfinite(distances)):
+        raise ValueError("Ephemeris contains invalid body vectors.")
+    return np.asarray(array / distances[:, None], dtype=np.float32), distances
+
+
+def vectors_to_plot_track(vectors: np.ndarray) -> np.ndarray:
+    """Convert ICRF vectors to RA-left Mollweide longitude and declination."""
+    units, _ = normalize_rows(vectors)
+    right_ascension = np.arctan2(units[:, 1], units[:, 0])
+    declination = np.arcsin(np.clip(units[:, 2], -1.0, 1.0))
+    longitude = (-right_ascension + math.pi) % (2.0 * math.pi) - math.pi
+    return np.column_stack((longitude, declination))
+
+
+def daily_coverage_map(
+    grid_vectors: np.ndarray,
+    earth_vectors: np.ndarray,
+    moon_vectors: np.ndarray,
+    sun_vectors: np.ndarray,
+    earth_clearance_deg: float,
+    moon_clearance_deg: float,
+    sun_exclusion_deg: float,
+    step_minutes: int,
+    grid_shape: tuple[int, int],
+    block_size: int = 24_000,
+) -> np.ndarray:
+    """Integrate one day's unobscured time for every fixed sky direction."""
+    earth_units, earth_distances = normalize_rows(earth_vectors)
+    moon_units, _ = normalize_rows(moon_vectors)
+    sun_units, _ = normalize_rows(sun_vectors)
+
+    earth_radii = np.arcsin(EARTH_MEAN_RADIUS_KM / earth_distances)
+    earth_radii += math.radians(earth_clearance_deg)
+    moon_radii = np.full(
+        len(moon_units), math.radians(moon_clearance_deg), dtype=float
+    )
+    sun_radii = np.full(
+        len(sun_units), math.radians(sun_exclusion_deg), dtype=float
+    )
+    thresholds = (
+        np.asarray(np.cos(earth_radii), dtype=np.float32),
+        np.asarray(np.cos(moon_radii), dtype=np.float32),
+        np.asarray(np.cos(sun_radii), dtype=np.float32),
+    )
+
+    point_count = grid_vectors.shape[0]
+    visible_samples = np.empty(point_count, dtype=np.uint16)
+    for block_start in range(0, point_count, block_size):
+        block_stop = min(point_count, block_start + block_size)
+        block = grid_vectors[block_start:block_stop].T
+        earth_inside = earth_units @ block >= thresholds[0][:, None]
+        moon_inside = moon_units @ block >= thresholds[1][:, None]
+        sun_inside = sun_units @ block >= thresholds[2][:, None]
+        visible_samples[block_start:block_stop] = np.count_nonzero(
+            ~(earth_inside | moon_inside | sun_inside), axis=0
+        )
+
+    return (
+        visible_samples.astype(np.float32) * (step_minutes / 60.0)
+    ).reshape(grid_shape)
+
+
+def solid_angle_weighted_mean(
+    values: np.ndarray,
+    latitude_grid: np.ndarray,
+) -> float:
+    """Return the full-sky equal-solid-angle mean of a gridded field."""
+    weights = np.cos(latitude_grid)
+    return float(np.sum(values * weights) / np.sum(weights))
+
+
+def solid_angle_fraction(mask: np.ndarray, latitude_grid: np.ndarray) -> float:
+    """Return the solid-angle fraction represented by a gridded mask."""
+    weights = np.cos(latitude_grid)
+    return float(np.sum(weights * mask) / np.sum(weights))
 
 
 def camera_basis(

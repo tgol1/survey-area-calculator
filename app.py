@@ -40,11 +40,6 @@ DAILY_COVERAGE_PROJECTION_PATH = (
     / "sky_projection"
     / "goes18_aitoff_mollweide_projection.png"
 )
-DAILY_SURVEY_PROJECTION_SCRIPT = (
-    PROJECT_ROOT
-    / "sky_projection"
-    / "goes18_daily_survey_coverage.py"
-)
 DAILY_CAMERA_PROJECTION_SCRIPT = (
     PROJECT_ROOT
     / "sky_projection"
@@ -688,7 +683,6 @@ def run_daily_camera_projection(
     if not required_files_exist(
         [
             DAILY_CAMERA_PROJECTION_SCRIPT,
-            DAILY_SURVEY_PROJECTION_SCRIPT,
             HORIZONS_SCRIPT,
         ]
     ):
