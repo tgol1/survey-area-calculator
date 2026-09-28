@@ -40,6 +40,16 @@ DAILY_COVERAGE_PROJECTION_PATH = (
     / "sky_projection"
     / "goes18_aitoff_mollweide_projection.png"
 )
+DAILY_SURVEY_PROJECTION_SCRIPT = (
+    PROJECT_ROOT
+    / "sky_projection"
+    / "goes18_daily_survey_coverage.py"
+)
+DAILY_CAMERA_PROJECTION_SCRIPT = (
+    PROJECT_ROOT
+    / "sky_projection"
+    / "goes18_daily_camera_projection.py"
+)
 MAX_HORIZONS_SPAN_DAYS = 34
 DEFAULT_DATE_RANGE = (date(2026, 8, 26), date(2026, 8, 28))
 DEFAULT_DAILY_WINDOW_1 = (date(2026, 1, 1), date(2026, 1, 15))
@@ -668,6 +678,70 @@ def run_daily_variation(
         )
 
 
+def run_daily_camera_projection(
+    start_date: date,
+    sun_angle: int,
+    camera_ra: float,
+    camera_dec: float,
+) -> None:
+    """Generate one 24-hour JPL sky map with a camera-field overlay."""
+    if not required_files_exist(
+        [
+            DAILY_CAMERA_PROJECTION_SCRIPT,
+            DAILY_SURVEY_PROJECTION_SCRIPT,
+            HORIZONS_SCRIPT,
+        ]
+    ):
+        return
+
+    with tempfile.TemporaryDirectory(prefix="goes18-camera-projection-") as directory:
+        output_png = Path(directory) / "goes18_daily_camera_projection.png"
+        command = [
+            sys.executable,
+            str(DAILY_CAMERA_PROJECTION_SCRIPT),
+            "--date",
+            start_date.isoformat(),
+            "--sun-exclusion",
+            str(sun_angle),
+            "--camera-ra",
+            str(camera_ra),
+            "--camera-dec",
+            str(camera_dec),
+            "--output",
+            str(output_png),
+        ]
+        with st.spinner(
+            "Downloading one day of JPL ephemerides and projecting the camera field..."
+        ):
+            return_code, log = run_command(command)
+
+        image_bytes = read_file_bytes(output_png)
+        stop_date = start_date + timedelta(days=1)
+        save_result(
+            "daily_camera_projection_result",
+            return_code,
+            log,
+            images={
+                "projection": (
+                    image_bytes,
+                    (
+                        f"GOES-18 unobscured observing time from {start_date} "
+                        f"00:00 through {stop_date} 00:00 UTC, with a 24° × 24° "
+                        f"camera centered at RA {camera_ra:.2f}°, "
+                        f"Dec {camera_dec:+.2f}°."
+                    ),
+                ),
+            },
+            downloads={
+                "png": (
+                    image_bytes,
+                    "goes18_daily_camera_projection.png",
+                    "image/png",
+                ),
+            },
+        )
+
+
 st.title("GOES-18 Visible-Sky Calculator")
 st.caption(
     "Interactive Earth, Moon, and Sun avoidance analysis for GOES-18 near 137°W"
@@ -739,6 +813,80 @@ with reference_tabs[1]:
             "to the deployed repository branch."
         )
 
+    st.markdown("### Plan a 24-hour observation")
+    st.markdown(
+        "Choose a UTC date and camera boresight. The generated map covers "
+        "midnight at the start of that date through midnight 24 hours later. "
+        "The magenta outline is a 24° × 24° TESS-like camera field projected "
+        "onto the celestial sphere."
+    )
+    with st.form("daily_camera_projection_form"):
+        projection_date = st.date_input(
+            "UTC start date",
+            value=DEFAULT_DATE_RANGE[0],
+            format="YYYY-MM-DD",
+            key="daily_camera_projection_date",
+            help="The end of the projection is automatically 24 hours later.",
+        )
+        projection_sun_angle = st.radio(
+            "Sun exclusion angle",
+            options=(30, 45),
+            index=1,
+            horizontal=True,
+            format_func=lambda angle: f"{angle}°",
+            key="daily_camera_projection_sun_angle",
+        )
+        camera_columns = st.columns(2)
+        camera_ra = camera_columns[0].number_input(
+            "Camera-center right ascension (degrees)",
+            min_value=0.0,
+            max_value=360.0,
+            value=120.0,
+            step=1.0,
+            format="%.2f",
+            key="daily_camera_projection_ra",
+            help="0° and 360° identify the same right ascension.",
+        )
+        camera_dec = camera_columns[1].number_input(
+            "Camera-center declination (degrees)",
+            min_value=-90.0,
+            max_value=90.0,
+            value=-30.0,
+            step=1.0,
+            format="%.2f",
+            key="daily_camera_projection_dec",
+            help=(
+                "Near ±90°, a square field appears strongly distorted on a "
+                "flat Mollweide map."
+            ),
+        )
+        projection_submit = st.form_submit_button(
+            "Generate 24-hour camera projection",
+            type="primary",
+        )
+
+    if projection_submit:
+        if isinstance(projection_date, date):
+            run_daily_camera_projection(
+                projection_date,
+                projection_sun_angle,
+                float(camera_ra),
+                float(camera_dec),
+            )
+        else:
+            st.error("Select a valid UTC start date.")
+    render_result("daily_camera_projection_result")
+
+    st.info(
+        "The camera outline is calculated on the celestial sphere using a "
+        "rectilinear tangent-plane projection. It therefore represents a true "
+        "24° horizontal by 24° vertical field at its center. The curved or "
+        "stretched appearance near a pole or the map seam is projection "
+        "distortion, not a change in the camera's angular field of view. At "
+        "exactly ±90° declination, RA no longer selects a different center; "
+        "it sets the footprint's orientation around the pole."
+    )
+
     st.markdown(
         """
         #### How to read the figure
@@ -763,6 +911,13 @@ with reference_tabs[1]:
           beginning of each UTC day. The caps themselves are not drawn at one
           instant because their motion has already been accumulated into the
           coverage colors.
+        - In a generated planning map, track markers appear every **six
+          hours**. The dashed white circle explicitly shows the Moon's 20°
+          exclusion region at 12:00 UTC, making its location and scale easier
+          to distinguish from the full-day accumulated coverage.
+        - The **magenta 24° × 24° outline** is the requested camera field. Its
+          center is marked with a cross, and the figure reports mean, minimum,
+          and maximum available time within that field.
         - **Sky-mean access** is the solid-angle-weighted average number of
           available hours over the entire celestial sphere. **Continuous 24 h
           access** is the percentage of the full sky that remains unobscured
