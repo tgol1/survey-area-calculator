@@ -678,6 +678,7 @@ def run_daily_camera_projection(
     sun_angle: int,
     camera_ra: float,
     camera_dec: float,
+    camera_roll: float,
 ) -> None:
     """Generate one 24-hour JPL sky map with a camera-field overlay."""
     if not required_files_exist(
@@ -701,6 +702,8 @@ def run_daily_camera_projection(
             str(camera_ra),
             "--camera-dec",
             str(camera_dec),
+            "--camera-roll",
+            str(camera_roll),
             "--output",
             str(output_png),
         ]
@@ -722,7 +725,8 @@ def run_daily_camera_projection(
                         f"GOES-18 unobscured observing time from {start_date} "
                         f"00:00 through {stop_date} 00:00 UTC, with a 24° × 24° "
                         f"camera centered at RA {camera_ra:.2f}°, "
-                        f"Dec {camera_dec:+.2f}°."
+                        f"Dec {camera_dec:+.2f}°, with roll "
+                        f"{camera_roll:+.2f}°."
                     ),
                 ),
             },
@@ -812,7 +816,7 @@ with reference_tabs[1]:
         "Choose a UTC date and camera boresight. The generated map covers "
         "midnight at the start of that date through midnight 24 hours later. "
         "The magenta outline is a 24° × 24° TESS-like camera field projected "
-        "onto the celestial sphere."
+        "onto the celestial sphere and rotated by the requested roll angle."
     )
     with st.form("daily_camera_projection_form"):
         projection_date = st.date_input(
@@ -830,7 +834,7 @@ with reference_tabs[1]:
             format_func=lambda angle: f"{angle}°",
             key="daily_camera_projection_sun_angle",
         )
-        camera_columns = st.columns(2)
+        camera_columns = st.columns(3)
         camera_ra = camera_columns[0].number_input(
             "Camera-center right ascension (degrees)",
             min_value=0.0,
@@ -854,6 +858,19 @@ with reference_tabs[1]:
                 "flat Mollweide map."
             ),
         )
+        camera_roll = camera_columns[2].number_input(
+            "Camera roll angle (degrees)",
+            min_value=-180.0,
+            max_value=180.0,
+            value=0.0,
+            step=5.0,
+            format="%.2f",
+            key="daily_camera_projection_roll",
+            help=(
+                "Positive roll rotates the camera's horizontal axis from "
+                "local celestial east toward local celestial north."
+            ),
+        )
         projection_submit = st.form_submit_button(
             "Generate 24-hour camera projection",
             type="primary",
@@ -866,6 +883,7 @@ with reference_tabs[1]:
                 projection_sun_angle,
                 float(camera_ra),
                 float(camera_dec),
+                float(camera_roll),
             )
         else:
             st.error("Select a valid UTC start date.")
@@ -878,7 +896,10 @@ with reference_tabs[1]:
         "stretched appearance near a pole or the map seam is projection "
         "distortion, not a change in the camera's angular field of view. At "
         "exactly ±90° declination, RA no longer selects a different center; "
-        "it sets the footprint's orientation around the pole."
+        "RA and roll set the footprint's orientation around the pole. The "
+        "dotted yellow curve marks 60° angular separation from the Sun at "
+        "12:00 UTC. It is a planning reference and does not change the "
+        "selected 30° or 45° Sun exclusion calculation."
     )
 
     st.markdown(
@@ -911,7 +932,14 @@ with reference_tabs[1]:
           to distinguish from the full-day accumulated coverage.
         - The **magenta 24° × 24° outline** is the requested camera field. Its
           center is marked with a cross, and the figure reports mean, minimum,
-          and maximum available time within that field.
+          and maximum available time within that field. The roll input rotates
+          this footprint about its RA/Dec center without moving the boresight.
+        - The **dotted yellow curve** is the set of directions exactly 60° from
+          the Sun at 12:00 UTC. The region toward the Sun inside that curve
+          highlights sky that is generally difficult for nighttime ground
+          observatories. Directions outside the selected 30° or 45° Sun
+          exclusion may still be available to the GEO camera. The 60° curve
+          is a visual planning guide only and is not another exclusion cap.
         - **Sky-mean access** is the solid-angle-weighted average number of
           available hours over the entire celestial sphere. **Continuous 24 h
           access** is the percentage of the full sky that remains unobscured

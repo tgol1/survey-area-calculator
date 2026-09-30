@@ -207,7 +207,7 @@ def parse_arguments() -> argparse.Namespace:
 
 def validate_arguments(
     args: argparse.Namespace,
-) -> tuple[date, float, float, float]:
+) -> tuple[date, float, float, float, float]:
     start_date = args.start_date or prompt_for_date()
     sun_exclusion = args.sun_exclusion or prompt_for_sun_exclusion()
     camera_ra = (
@@ -229,6 +229,8 @@ def validate_arguments(
         raise ValueError("--camera-ra must be between 0 and 360 degrees.")
     if not -90.0 <= camera_dec <= 90.0:
         raise ValueError("--camera-dec must be between -90 and +90 degrees.")
+    if not math.isfinite(args.camera_roll):
+        raise ValueError("--camera-roll must be a finite angle in degrees.")
     if not 0.0 < args.camera_size < 120.0:
         raise ValueError("--camera-size must be greater than 0 and below 120 degrees.")
     if args.step_minutes <= 0 or 1440 % args.step_minutes != 0:
@@ -241,7 +243,8 @@ def validate_arguments(
         raise ValueError("The sky grid is too coarse; use at least 181 x 91.")
     if args.dpi < 72:
         raise ValueError("--dpi must be at least 72.")
-    return start_date, sun_exclusion, camera_ra % 360.0, camera_dec
+    camera_roll = (args.camera_roll + 180.0) % 360.0 - 180.0
+    return start_date, sun_exclusion, camera_ra % 360.0, camera_dec, camera_roll
 
 
 def fetch_ephemeris(
@@ -684,6 +687,19 @@ def write_figure(
         zorder=6,
     )
 
+    sunward_guide = spherical_cap_boundary(
+        body_vectors["Sun"][midpoint_index], 60.0
+    )
+    plot_wrapped_line(
+        axis,
+        sunward_guide,
+        color="#FFD400",
+        linewidth=1.9,
+        linestyle=":",
+        label="60° from Sun at 12:00 UTC (planning guide)",
+        zorder=7,
+    )
+
     detector_outline = camera_boundary(
         camera_ra_deg,
         camera_dec_deg,
@@ -763,6 +779,18 @@ def write_figure(
             Line2D(
                 [],
                 [],
+                color="#FFD400",
+                linestyle=":",
+                linewidth=2.0,
+                path_effects=[
+                    path_effects.Stroke(linewidth=3.5, foreground="#111827"),
+                    path_effects.Normal(),
+                ],
+                label="60° from Sun at 12:00 UTC (planning guide)",
+            ),
+            Line2D(
+                [],
+                [],
                 color=CAMERA_COLOR,
                 linewidth=2.8,
                 label=f"Camera field ({camera_size_deg:g}° × {camera_size_deg:g}°)",
@@ -801,7 +829,9 @@ def write_figure(
         0.018,
         0.025,
         "Color = accumulated unobscured time. Tracks and 6-hour markers show "
-        "body motion; the dashed circle is a 12:00 UTC Moon reference cap.\n"
+        "body motion; the dashed white circle is the 12:00 UTC Moon cap.\n"
+        "The dotted yellow line is 60° from the Sun at 12:00 UTC and is a "
+        "planning guide, not an added exclusion.\n"
         f"Earth limb + {earth_clearance_deg:g}°; observer = {observer_name}; "
         "RA increases toward the left.",
         ha="left",
@@ -813,7 +843,8 @@ def write_figure(
         0.982,
         0.025,
         f"Camera center: RA {camera_ra_deg:.2f}° "
-        f"({camera_ra_deg / 15.0:.3f} h), Dec {camera_dec_deg:+.2f}°\n"
+        f"({camera_ra_deg / 15.0:.3f} h), Dec {camera_dec_deg:+.2f}°, "
+        f"roll {camera_roll_deg:+.2f}°\n"
         f"Field mean {camera_stats['mean']:.2f} h  ·  "
         f"min {camera_stats['minimum']:.2f} h  ·  "
         f"max {camera_stats['maximum']:.2f} h  ·  "
@@ -835,7 +866,13 @@ def write_figure(
 def main() -> int:
     args = parse_arguments()
     try:
-        start_date, sun_exclusion, camera_ra, camera_dec = validate_arguments(args)
+        (
+            start_date,
+            sun_exclusion,
+            camera_ra,
+            camera_dec,
+            camera_roll,
+        ) = validate_arguments(args)
         ephemeris = fetch_ephemeris(
             start_date,
             days=1,
@@ -863,7 +900,7 @@ def main() -> int:
             camera_ra,
             camera_dec,
             args.camera_size,
-            args.camera_roll,
+            camera_roll,
         ).reshape(latitude_grid.shape)
         statistics = camera_statistics(
             coverage_hours,
@@ -890,7 +927,7 @@ def main() -> int:
             camera_ra,
             camera_dec,
             args.camera_size,
-            args.camera_roll,
+            camera_roll,
             statistics,
             args.step_minutes,
             args.dpi,
@@ -911,6 +948,7 @@ def main() -> int:
     )
     print(
         f"Camera: RA {camera_ra:.6f} deg, Dec {camera_dec:+.6f} deg, "
+        f"roll {camera_roll:+.6f} deg, "
         f"field {args.camera_size:g} x {args.camera_size:g} deg"
     )
     print(
