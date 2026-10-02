@@ -1,4 +1,4 @@
-## Survey Area Calculator v5.4
+## Visible-Sky Calculator v5.4
 George Tolis
 
 Last updated: 2 October 2026
