@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Create a one-day GOES-18 survey-coverage map with a camera footprint.
+"""Create a GOES-18 survey-coverage map with a camera footprint.
 
-The map integrates one complete 24-hour UTC interval at five-minute cadence.
-For every sample, a fixed celestial direction is considered available only
-when it lies outside the Earth, Moon, and Sun exclusion caps.  The resulting
-Mollweide map reports total unobscured time from 0 to 24 hours.
+The map integrates a 3-hour interval, a 24-hour interval, or both at
+five-minute cadence.  For every sample, a fixed celestial direction is considered
+available only when it lies outside the Earth, Moon, and Sun exclusion caps.
+The resulting Mollweide map reports total unobscured time over the selected
+interval.
 
 A 24 degree by 24 degree TESS-like camera field is projected from a requested
 right ascension and declination.  The field is constructed in the tangent
@@ -17,7 +18,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 import math
 from pathlib import Path
 import sys
@@ -36,6 +37,8 @@ if str(PROJECT_ROOT) not in sys.path:
 
 UTC = timezone.utc
 DEFAULT_OUTPUT = SCRIPT_DIRECTORY / "goes18_daily_camera_projection.png"
+DEFAULT_OUTPUT_3H = SCRIPT_DIRECTORY / "goes18_3h_camera_projection.png"
+DEFAULT_OUTPUT_24H = SCRIPT_DIRECTORY / "goes18_24h_camera_projection.png"
 CAMERA_COLOR = "#FF2D95"
 TRACK_COLORS = {
     "Earth": "#2563EB",
@@ -87,6 +90,36 @@ def prompt_for_date() -> date:
             print(f"Invalid date: {exc}")
 
 
+def parse_clock_time(value: str) -> time:
+    """Parse one HH:MM UTC clock time."""
+    try:
+        return datetime.strptime(value.strip(), "%H:%M").time()
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("Use HH:MM in 24-hour UTC time.") from exc
+
+
+def prompt_for_start_time() -> time:
+    while True:
+        try:
+            return parse_clock_time(input("Enter UTC start time (HH:MM): "))
+        except argparse.ArgumentTypeError as exc:
+            print(f"Invalid time: {exc}")
+
+
+def prompt_for_windows() -> tuple[int, ...]:
+    while True:
+        choice = input(
+            "Choose integration output (3 hours, 24 hours, or both): "
+        ).strip().lower()
+        if choice in {"3", "3h", "3 hour", "3 hours"}:
+            return (3,)
+        if choice in {"24", "24h", "24 hour", "24 hours"}:
+            return (24,)
+        if choice in {"both", "3 and 24", "3,24"}:
+            return (3, 24)
+        print("Enter 3, 24, or both.")
+
+
 def prompt_for_sun_exclusion() -> float:
     while True:
         try:
@@ -116,8 +149,8 @@ def prompt_for_float(label: str, minimum: float, maximum: float) -> float:
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Create a 24-hour GOES-18 sky-coverage projection and overlay a "
-            "TESS-like camera field."
+            "Create 3-hour, 24-hour, or both GOES-18 sky-coverage projections "
+            "and overlay a TESS-like camera field."
         )
     )
     parser.add_argument(
@@ -125,6 +158,22 @@ def parse_arguments() -> argparse.Namespace:
         dest="start_date",
         type=parse_date,
         help="UTC start date, YYYY-MM-DD; prompts when omitted",
+    )
+    parser.add_argument(
+        "--start-time",
+        type=parse_clock_time,
+        help="UTC start time, HH:MM; prompts when omitted",
+    )
+    parser.add_argument(
+        "--window-hours",
+        type=int,
+        choices=(3, 24),
+        help="Generate one integration window; omit when using --both-windows",
+    )
+    parser.add_argument(
+        "--both-windows",
+        action="store_true",
+        help="Generate both 3-hour and 24-hour maps from one ephemeris download",
     )
     parser.add_argument(
         "--sun-exclusion",
@@ -158,7 +207,7 @@ def parse_arguments() -> argparse.Namespace:
         "--step-minutes",
         type=int,
         default=5,
-        help="Time-integration interval dividing 1440 (default: 5)",
+        help="Time-integration interval dividing the window evenly (default: 5)",
     )
     parser.add_argument(
         "--earth-clearance",
@@ -194,7 +243,19 @@ def parse_arguments() -> argparse.Namespace:
         "--output",
         type=Path,
         default=DEFAULT_OUTPUT,
-        help="Output PNG path",
+        help="Output PNG path when generating one window",
+    )
+    parser.add_argument(
+        "--output-3h",
+        type=Path,
+        default=DEFAULT_OUTPUT_3H,
+        help="3-hour PNG path when using --both-windows",
+    )
+    parser.add_argument(
+        "--output-24h",
+        type=Path,
+        default=DEFAULT_OUTPUT_24H,
+        help="24-hour PNG path when using --both-windows",
     )
     parser.add_argument(
         "--dpi",
@@ -207,8 +268,17 @@ def parse_arguments() -> argparse.Namespace:
 
 def validate_arguments(
     args: argparse.Namespace,
-) -> tuple[date, float, float, float, float]:
+) -> tuple[datetime, tuple[int, ...], float, float, float, float]:
     start_date = args.start_date or prompt_for_date()
+    start_time = args.start_time or prompt_for_start_time()
+    if args.both_windows and args.window_hours is not None:
+        raise ValueError("Use either --both-windows or --window-hours, not both.")
+    if args.both_windows:
+        windows = (3, 24)
+    elif args.window_hours is not None:
+        windows = (args.window_hours,)
+    else:
+        windows = prompt_for_windows()
     sun_exclusion = args.sun_exclusion or prompt_for_sun_exclusion()
     camera_ra = (
         args.camera_ra
@@ -233,8 +303,12 @@ def validate_arguments(
         raise ValueError("--camera-roll must be a finite angle in degrees.")
     if not 0.0 < args.camera_size < 120.0:
         raise ValueError("--camera-size must be greater than 0 and below 120 degrees.")
-    if args.step_minutes <= 0 or 1440 % args.step_minutes != 0:
-        raise ValueError("--step-minutes must be a positive divisor of 1440.")
+    if args.step_minutes <= 0 or any(
+        window_hours * 60 % args.step_minutes != 0 for window_hours in windows
+    ):
+        raise ValueError(
+            "--step-minutes must be positive and divide every selected window evenly."
+        )
     if not 0.0 <= args.earth_clearance <= 60.0:
         raise ValueError("--earth-clearance must be between 0 and 60 degrees.")
     if not 0.0 <= args.moon_clearance <= 60.0:
@@ -243,19 +317,31 @@ def validate_arguments(
         raise ValueError("The sky grid is too coarse; use at least 181 x 91.")
     if args.dpi < 72:
         raise ValueError("--dpi must be at least 72.")
+    if len(windows) == 2:
+        output_3h = args.output_3h.expanduser().resolve()
+        output_24h = args.output_24h.expanduser().resolve()
+        if output_3h == output_24h:
+            raise ValueError("--output-3h and --output-24h must be different paths.")
     camera_roll = (args.camera_roll + 180.0) % 360.0 - 180.0
-    return start_date, sun_exclusion, camera_ra % 360.0, camera_dec, camera_roll
+    start_datetime = datetime.combine(start_date, start_time, tzinfo=UTC)
+    return (
+        start_datetime,
+        windows,
+        sun_exclusion,
+        camera_ra % 360.0,
+        camera_dec,
+        camera_roll,
+    )
 
 
 def fetch_ephemeris(
-    start_date: date,
-    days: int,
+    start_datetime: datetime,
+    window_hours: int,
     step_minutes: int,
     observer_spk: int,
 ) -> Ephemeris:
     """Download matching Earth, Moon, and Sun vectors from JPL Horizons."""
-    start_datetime = datetime.combine(start_date, datetime.min.time(), tzinfo=UTC)
-    stop_datetime = start_datetime + timedelta(days=days)
+    stop_datetime = start_datetime + timedelta(hours=window_hours)
     start_text = start_datetime.strftime("%Y-%m-%d %H:%M")
     stop_text = stop_datetime.strftime("%Y-%m-%d %H:%M")
     step_text = f"{step_minutes} min"
@@ -268,7 +354,8 @@ def fetch_ephemeris(
     ):
         print(
             f"Downloading {body_name} vectors from JPL Horizons "
-            f"({start_date} through {stop_datetime.date()})..."
+            f"({start_datetime:%Y-%m-%d %H:%M} through "
+            f"{stop_datetime:%Y-%m-%d %H:%M} UTC)..."
         )
         fetched[body_name] = fetch_vectors(
             target_id,
@@ -293,7 +380,7 @@ def fetch_ephemeris(
             raise RuntimeError(f"Earth and {body_name} observers do not match.")
 
     times = tuple(horizons_calendar_to_utc(value) for value in earth_calendar)
-    expected_samples = days * (1440 // step_minutes) + 1
+    expected_samples = window_hours * 60 // step_minutes + 1
     if len(times) != expected_samples:
         raise RuntimeError(
             f"Horizons returned {len(times)} samples; expected {expected_samples}."
@@ -366,7 +453,7 @@ def daily_coverage_map(
     grid_shape: tuple[int, int],
     block_size: int = 24_000,
 ) -> np.ndarray:
-    """Integrate one day's unobscured time for every fixed sky direction."""
+    """Integrate unobscured time for every fixed sky direction."""
     earth_units, earth_distances = normalize_rows(earth_vectors)
     moon_units, _ = normalize_rows(moon_vectors)
     sun_units, _ = normalize_rows(sun_vectors)
@@ -583,24 +670,32 @@ def camera_statistics(
     camera_mask: np.ndarray,
     latitude_grid: np.ndarray,
     step_minutes: int,
+    window_hours: int,
 ) -> dict[str, float]:
     """Summarize availability inside the projected detector footprint."""
     if not np.any(camera_mask):
         raise ValueError("The camera footprint did not intersect the sky grid.")
     weights = np.cos(latitude_grid)[camera_mask]
     values = coverage_hours[camera_mask]
-    full_day = np.isclose(values, 24.0, atol=step_minutes / 120.0)
+    full_window = np.isclose(
+        values,
+        float(window_hours),
+        atol=step_minutes / 120.0,
+    )
     return {
         "mean": float(np.average(values, weights=weights)),
         "minimum": float(np.min(values)),
         "maximum": float(np.max(values)),
-        "full_day_fraction": float(np.sum(weights[full_day]) / np.sum(weights)),
+        "full_window_fraction": float(
+            np.sum(weights[full_window]) / np.sum(weights)
+        ),
     }
 
 
 def write_figure(
     path: Path,
-    start_date: date,
+    start_datetime: datetime,
+    window_hours: int,
     coverage_hours: np.ndarray,
     longitude_grid: np.ndarray,
     latitude_grid: np.ndarray,
@@ -617,10 +712,10 @@ def write_figure(
     step_minutes: int,
     dpi: int,
 ) -> Path:
-    """Write the one-day Mollweide availability map and camera overlay."""
+    """Write the selected-window Mollweide availability map and overlay."""
     figure = plt.figure(figsize=(14.0, 8.35))
     axis = figure.add_subplot(111, projection="mollweide")
-    norm = mcolors.Normalize(vmin=0.0, vmax=24.0)
+    norm = mcolors.Normalize(vmin=0.0, vmax=float(window_hours))
     image = axis.pcolormesh(
         longitude_grid,
         latitude_grid,
@@ -631,11 +726,14 @@ def write_figure(
         rasterized=True,
         zorder=0,
     )
+    contour_levels = tuple(
+        float(window_hours) * fraction for fraction in (0.25, 0.50, 0.75)
+    )
     contours = axis.contour(
         longitude_grid,
         latitude_grid,
         coverage_hours,
-        levels=(6.0, 12.0, 18.0),
+        levels=contour_levels,
         colors="white",
         linewidths=0.55,
         alpha=0.56,
@@ -650,6 +748,7 @@ def write_figure(
     )
 
     sample_count = len(next(iter(body_vectors.values())))
+    marker_interval_hours = 1 if window_hours == 3 else 6
     for body_name in ("Earth", "Moon", "Sun"):
         coordinates = vectors_to_plot_track(body_vectors[body_name])
         plot_wrapped_line(
@@ -660,7 +759,7 @@ def write_figure(
             label=f"{body_name} center track",
             zorder=5,
         )
-        for hour in (0, 6, 12, 18, 24):
+        for hour in range(0, window_hours + 1, marker_interval_hours):
             index = min(round(hour * 60 / step_minutes), sample_count - 1)
             longitude, latitude = coordinates[index]
             axis.scatter(
@@ -673,7 +772,13 @@ def write_figure(
                 zorder=7,
             )
 
-    midpoint_index = min(round(12 * 60 / step_minutes), sample_count - 1)
+    midpoint_minutes = window_hours * 60 / 2.0
+    midpoint_index = min(
+        round(midpoint_minutes / step_minutes),
+        sample_count - 1,
+    )
+    midpoint_datetime = start_datetime + timedelta(minutes=midpoint_minutes)
+    midpoint_label = midpoint_datetime.strftime("%Y-%m-%d %H:%M UTC")
     moon_reference_cap = spherical_cap_boundary(
         body_vectors["Moon"][midpoint_index], moon_clearance_deg
     )
@@ -683,7 +788,7 @@ def write_figure(
         color="#FFFFFF",
         linewidth=1.25,
         linestyle="--",
-        label=f"Moon exclusion at 12:00 UTC ({moon_clearance_deg:g}°)",
+        label=f"Moon exclusion at midpoint ({moon_clearance_deg:g}°)",
         zorder=6,
     )
 
@@ -696,7 +801,7 @@ def write_figure(
         color="#FFD400",
         linewidth=1.9,
         linestyle=":",
-        label="60° from Sun at 12:00 UTC (planning guide)",
+        label="60° from Sun at midpoint (planning guide)",
         zorder=7,
     )
 
@@ -740,10 +845,11 @@ def write_figure(
         image,
         cax=colorbar_axis,
         orientation="horizontal",
-        ticks=(0, 4, 8, 12, 16, 20, 24),
+        ticks=np.linspace(0.0, float(window_hours), 7),
     )
     colorbar.set_label(
-        "Time unobscured during the selected 24-hour interval (hours)",
+        f"Time unobscured during the selected {window_hours}-hour interval "
+        "(hours)",
         fontsize=9.5,
         weight="bold",
     )
@@ -774,7 +880,7 @@ def write_figure(
                     path_effects.Stroke(linewidth=3.0, foreground="#111827"),
                     path_effects.Normal(),
                 ],
-                label=f"Moon exclusion at 12:00 UTC ({moon_clearance_deg:g}°)",
+                label=f"Moon exclusion at midpoint ({moon_clearance_deg:g}°)",
             ),
             Line2D(
                 [],
@@ -786,7 +892,7 @@ def write_figure(
                     path_effects.Stroke(linewidth=3.5, foreground="#111827"),
                     path_effects.Normal(),
                 ],
-                label="60° from Sun at 12:00 UTC (planning guide)",
+                label="60° from Sun at midpoint (planning guide)",
             ),
             Line2D(
                 [],
@@ -808,9 +914,9 @@ def write_figure(
         framealpha=0.94,
     )
 
-    stop_date = start_date + timedelta(days=1)
+    stop_datetime = start_datetime + timedelta(hours=window_hours)
     figure.suptitle(
-        "GOES-18 24-hour sky-survey planning map",
+        f"NEO {window_hours}-hour sky-survey planning map",
         y=0.985,
         fontsize=17,
         weight="bold",
@@ -819,7 +925,8 @@ def write_figure(
     figure.text(
         0.5,
         0.943,
-        f"{start_date:%Y-%m-%d} 00:00 to {stop_date:%Y-%m-%d} 00:00 UTC  ·  "
+        f"{start_datetime:%Y-%m-%d %H:%M} to "
+        f"{stop_datetime:%Y-%m-%d %H:%M} UTC  ·  "
         f"{step_minutes}-minute samples  ·  Sun exclusion {sun_exclusion_deg:g}°",
         ha="center",
         fontsize=10.0,
@@ -828,10 +935,10 @@ def write_figure(
     figure.text(
         0.018,
         0.025,
-        "Color = accumulated unobscured time. Tracks and 6-hour markers show "
-        "body motion; the dashed white circle is the 12:00 UTC Moon cap.\n"
-        "The dotted yellow line is 60° from the Sun at 12:00 UTC and is a "
-        "planning guide, not an added exclusion.\n"
+        f"Color = accumulated unobscured time. Tracks and {marker_interval_hours}-hour "
+        "markers show body motion.\n"
+        f"Dashed white Moon cap and dotted yellow 60° Sun guide use the interval "
+        f"midpoint ({midpoint_label}); the Sun guide is not an added exclusion.\n"
         f"Earth limb + {earth_clearance_deg:g}°; observer = {observer_name}; "
         "RA increases toward the left.",
         ha="left",
@@ -845,10 +952,12 @@ def write_figure(
         f"Camera center: RA {camera_ra_deg:.2f}° "
         f"({camera_ra_deg / 15.0:.3f} h), Dec {camera_dec_deg:+.2f}°, "
         f"roll {camera_roll_deg:+.2f}°\n"
-        f"Field mean {camera_stats['mean']:.2f} h  ·  "
+        f"Field mean {camera_stats['mean']:.2f} h "
+        f"({100.0 * camera_stats['mean'] / window_hours:.1f}%)  ·  "
         f"min {camera_stats['minimum']:.2f} h  ·  "
         f"max {camera_stats['maximum']:.2f} h  ·  "
-        f"24 h field area {100.0 * camera_stats['full_day_fraction']:.1f}%",
+        f"Full-window field area "
+        f"{100.0 * camera_stats['full_window_fraction']:.1f}%",
         ha="right",
         va="bottom",
         fontsize=8.2,
@@ -863,37 +972,80 @@ def write_figure(
     return resolved
 
 
+def print_window_summary(
+    *,
+    start_datetime: datetime,
+    window_hours: int,
+    step_minutes: int,
+    camera_ra: float,
+    camera_dec: float,
+    camera_roll: float,
+    camera_size: float,
+    statistics: dict[str, float],
+    global_mean: float,
+    global_full_window: float,
+    output: Path,
+) -> None:
+    """Print one generated window's statistics and output location."""
+    stop_datetime = start_datetime + timedelta(hours=window_hours)
+    sample_count = window_hours * 60 // step_minutes
+    print(f"\n{window_hours}-hour camera planning projection complete")
+    print(
+        f"Window: {start_datetime:%Y-%m-%d %H:%M} UTC through "
+        f"{stop_datetime:%Y-%m-%d %H:%M} UTC"
+    )
+    print(
+        f"Sampling: {sample_count} {step_minutes}-minute intervals "
+        f"({sample_count + 1} ephemeris endpoints)"
+    )
+    print(
+        f"Camera: RA {camera_ra:.6f} deg, Dec {camera_dec:+.6f} deg, "
+        f"roll {camera_roll:+.6f} deg, "
+        f"field {camera_size:g} x {camera_size:g} deg"
+    )
+    print(
+        f"Camera-field access: min={statistics['minimum']:.6f} h, "
+        f"mean={statistics['mean']:.6f} h, max={statistics['maximum']:.6f} h"
+    )
+    print(
+        "Camera-field time-averaged availability: "
+        f"{100.0 * statistics['mean'] / window_hours:.6f}%"
+    )
+    print(
+        f"Camera field continuously accessible for {window_hours} h: "
+        f"{100.0 * statistics['full_window_fraction']:.6f}% of field area"
+    )
+    print(
+        f"Full-sky mean access={global_mean:.6f} h; full-sky continuous "
+        f"{window_hours} h access={100.0 * global_full_window:.6f}%"
+    )
+    print(
+        "Full-sky time-averaged availability: "
+        f"{100.0 * global_mean / window_hours:.6f}%"
+    )
+    print(f"Wrote projection PNG: {output}")
+
+
 def main() -> int:
     args = parse_arguments()
     try:
         (
-            start_date,
+            start_datetime,
+            windows,
             sun_exclusion,
             camera_ra,
             camera_dec,
             camera_roll,
         ) = validate_arguments(args)
         ephemeris = fetch_ephemeris(
-            start_date,
-            days=1,
+            start_datetime,
+            window_hours=max(windows),
             step_minutes=args.step_minutes,
             observer_spk=args.observer_spk,
         )
         longitude_grid, latitude_grid, grid_vectors = sky_grid(
             args.longitude_points,
             args.latitude_points,
-        )
-        samples_per_day = 1440 // args.step_minutes
-        coverage_hours = daily_coverage_map(
-            grid_vectors,
-            ephemeris.earth_vectors_km[:samples_per_day],
-            ephemeris.moon_vectors_km[:samples_per_day],
-            ephemeris.sun_vectors_km[:samples_per_day],
-            args.earth_clearance,
-            args.moon_clearance,
-            sun_exclusion,
-            args.step_minutes,
-            latitude_grid.shape,
         )
         camera_mask = camera_footprint_mask(
             grid_vectors,
@@ -902,68 +1054,86 @@ def main() -> int:
             args.camera_size,
             camera_roll,
         ).reshape(latitude_grid.shape)
-        statistics = camera_statistics(
-            coverage_hours,
-            camera_mask,
-            latitude_grid,
-            args.step_minutes,
-        )
-        body_vectors = {
-            "Earth": ephemeris.earth_vectors_km,
-            "Moon": ephemeris.moon_vectors_km,
-            "Sun": ephemeris.sun_vectors_km,
-        }
-        output = write_figure(
-            args.output,
-            start_date,
-            coverage_hours,
-            longitude_grid,
-            latitude_grid,
-            body_vectors,
-            ephemeris.observer_name,
-            sun_exclusion,
-            args.earth_clearance,
-            args.moon_clearance,
-            camera_ra,
-            camera_dec,
-            args.camera_size,
-            camera_roll,
-            statistics,
-            args.step_minutes,
-            args.dpi,
-        )
+
+        if len(windows) == 2:
+            output_paths = {3: args.output_3h, 24: args.output_24h}
+        else:
+            output_paths = {windows[0]: args.output}
+
+        for window_hours in windows:
+            samples_per_window = window_hours * 60 // args.step_minutes
+            coverage_hours = daily_coverage_map(
+                grid_vectors,
+                ephemeris.earth_vectors_km[:samples_per_window],
+                ephemeris.moon_vectors_km[:samples_per_window],
+                ephemeris.sun_vectors_km[:samples_per_window],
+                args.earth_clearance,
+                args.moon_clearance,
+                sun_exclusion,
+                args.step_minutes,
+                latitude_grid.shape,
+            )
+            statistics = camera_statistics(
+                coverage_hours,
+                camera_mask,
+                latitude_grid,
+                args.step_minutes,
+                window_hours,
+            )
+            body_vectors = {
+                "Earth": ephemeris.earth_vectors_km[: samples_per_window + 1],
+                "Moon": ephemeris.moon_vectors_km[: samples_per_window + 1],
+                "Sun": ephemeris.sun_vectors_km[: samples_per_window + 1],
+            }
+            output = write_figure(
+                output_paths[window_hours],
+                start_datetime,
+                window_hours,
+                coverage_hours,
+                longitude_grid,
+                latitude_grid,
+                body_vectors,
+                ephemeris.observer_name,
+                sun_exclusion,
+                args.earth_clearance,
+                args.moon_clearance,
+                camera_ra,
+                camera_dec,
+                args.camera_size,
+                camera_roll,
+                statistics,
+                args.step_minutes,
+                args.dpi,
+            )
+            global_mean = solid_angle_weighted_mean(
+                coverage_hours,
+                latitude_grid,
+            )
+            global_full_window = solid_angle_fraction(
+                np.isclose(
+                    coverage_hours,
+                    float(window_hours),
+                    atol=args.step_minutes / 120.0,
+                ),
+                latitude_grid,
+            )
+            print_window_summary(
+                start_datetime=start_datetime,
+                window_hours=window_hours,
+                step_minutes=args.step_minutes,
+                camera_ra=camera_ra,
+                camera_dec=camera_dec,
+                camera_roll=camera_roll,
+                camera_size=args.camera_size,
+                statistics=statistics,
+                global_mean=global_mean,
+                global_full_window=global_full_window,
+                output=output,
+            )
     except (OSError, RuntimeError, ValueError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
 
-    global_mean = solid_angle_weighted_mean(coverage_hours, latitude_grid)
-    global_full_day = solid_angle_fraction(
-        np.isclose(coverage_hours, 24.0, atol=args.step_minutes / 120.0),
-        latitude_grid,
-    )
-    print("\n24-hour camera planning projection complete")
-    print(
-        f"Window: {start_date} 00:00 UTC through "
-        f"{start_date + timedelta(days=1)} 00:00 UTC"
-    )
-    print(
-        f"Camera: RA {camera_ra:.6f} deg, Dec {camera_dec:+.6f} deg, "
-        f"roll {camera_roll:+.6f} deg, "
-        f"field {args.camera_size:g} x {args.camera_size:g} deg"
-    )
-    print(
-        f"Camera-field access: min={statistics['minimum']:.6f} h, "
-        f"mean={statistics['mean']:.6f} h, max={statistics['maximum']:.6f} h"
-    )
-    print(
-        "Camera field continuously accessible for 24 h: "
-        f"{100.0 * statistics['full_day_fraction']:.6f}% of field area"
-    )
-    print(
-        f"Full-sky mean access={global_mean:.6f} h; full-sky continuous "
-        f"24 h access={100.0 * global_full_day:.6f}%"
-    )
-    print(f"Wrote projection PNG: {output}")
     return 0
 
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import base64
 import csv
-from datetime import date, timedelta
+from datetime import date, datetime, time, timedelta
 import io
 import os
 from pathlib import Path
@@ -54,7 +54,7 @@ DAILY_WINDOW_DAYS = 14
 
 
 st.set_page_config(
-    page_title="GOES-18 Visible-Sky Calculator",
+    page_title="NEO (Near Earth Object) Visible-Sky Calculator",
     page_icon="🛰️",
     layout="wide",
 )
@@ -675,12 +675,13 @@ def run_daily_variation(
 
 def run_daily_camera_projection(
     start_date: date,
+    start_time: time,
     sun_angle: int,
     camera_ra: float,
     camera_dec: float,
     camera_roll: float,
 ) -> None:
-    """Generate one 24-hour JPL sky map with a camera-field overlay."""
+    """Generate matching 3-hour and 24-hour maps from one JPL download."""
     if not required_files_exist(
         [
             DAILY_CAMERA_PROJECTION_SCRIPT,
@@ -690,12 +691,16 @@ def run_daily_camera_projection(
         return
 
     with tempfile.TemporaryDirectory(prefix="goes18-camera-projection-") as directory:
-        output_png = Path(directory) / "goes18_daily_camera_projection.png"
+        output_3h = Path(directory) / "goes18_3h_camera_projection.png"
+        output_24h = Path(directory) / "goes18_24h_camera_projection.png"
         command = [
             sys.executable,
             str(DAILY_CAMERA_PROJECTION_SCRIPT),
             "--date",
             start_date.isoformat(),
+            "--start-time",
+            start_time.strftime("%H:%M"),
+            "--both-windows",
             "--sun-exclusion",
             str(sun_angle),
             "--camera-ra",
@@ -704,45 +709,66 @@ def run_daily_camera_projection(
             str(camera_dec),
             "--camera-roll",
             str(camera_roll),
-            "--output",
-            str(output_png),
+            "--output-3h",
+            str(output_3h),
+            "--output-24h",
+            str(output_24h),
         ]
         with st.spinner(
-            "Downloading one day of JPL ephemerides and projecting the camera field..."
+            "Downloading one 24-hour JPL ephemeris set at five-minute cadence "
+            "and generating both planning maps..."
         ):
             return_code, log = run_command(command)
 
-        image_bytes = read_file_bytes(output_png)
-        stop_date = start_date + timedelta(days=1)
+        image_3h = read_file_bytes(output_3h)
+        image_24h = read_file_bytes(output_24h)
+        start_datetime = datetime.combine(start_date, start_time)
+        stop_3h = start_datetime + timedelta(hours=3)
+        stop_24h = start_datetime + timedelta(hours=24)
+        camera_description = (
+            f"24° × 24° camera centered at RA {camera_ra:.2f}°, "
+            f"Dec {camera_dec:+.2f}°, with roll {camera_roll:+.2f}°."
+        )
         save_result(
             "daily_camera_projection_result",
             return_code,
             log,
             images={
-                "projection": (
-                    image_bytes,
+                "projection_3h": (
+                    image_3h,
                     (
-                        f"GOES-18 unobscured observing time from {start_date} "
-                        f"00:00 through {stop_date} 00:00 UTC, with a 24° × 24° "
-                        f"camera centered at RA {camera_ra:.2f}°, "
-                        f"Dec {camera_dec:+.2f}°, with roll "
-                        f"{camera_roll:+.2f}°."
+                        f"3-hour GOES-18 unobscured observing time from "
+                        f"{start_datetime:%Y-%m-%d %H:%M} through "
+                        f"{stop_3h:%Y-%m-%d %H:%M} UTC; {camera_description}"
+                    ),
+                ),
+                "projection_24h": (
+                    image_24h,
+                    (
+                        f"24-hour GOES-18 unobscured observing time from "
+                        f"{start_datetime:%Y-%m-%d %H:%M} through "
+                        f"{stop_24h:%Y-%m-%d %H:%M} UTC; {camera_description}"
                     ),
                 ),
             },
             downloads={
-                "png": (
-                    image_bytes,
-                    "goes18_daily_camera_projection.png",
+                "png_3h": (
+                    image_3h,
+                    "goes18_3h_camera_projection.png",
+                    "image/png",
+                ),
+                "png_24h": (
+                    image_24h,
+                    "goes18_24h_camera_projection.png",
                     "image/png",
                 ),
             },
         )
 
 
-st.title("GOES-18 Visible-Sky Calculator")
+st.title("NEO (Near Earth Object) Visible-Sky Calculator")
 st.caption(
-    "Interactive Earth, Moon, and Sun avoidance analysis for GOES-18 near 137°W"
+    "Interactive Earth, Moon, and Sun avoidance analysis from NEOs, using data from the GOES-18 satellite near 137°W"
 )
 
 
@@ -750,7 +776,7 @@ with st.expander("About", expanded=True):
     st.markdown(
         """
         Developed for MIT Kavli Institute, this tool calculates the instantaneous fraction of the celestial sky
-        available to an observer on GOES-18 after applying Earth, Moon, and Sun
+        available to an observer from the GOES-18 satellite after applying Earth, Moon, and Sun
         exclusion regions. It supports a NASA/JPL Horizons method, a local
         TLE/SGP4 method, and a direct comparison of the GOES-18 ephemeris
         directions derived from each method.
@@ -778,7 +804,7 @@ with reference_tabs[0]:
 
 
 with reference_tabs[1]:
-    st.markdown("### GOES-18 daily sky-survey coverage")
+    st.markdown("### NEO daily sky-survey coverage")
     st.markdown(
         "Each Mollweide panel combines one complete UTC day of five-minute "
         "JPL Horizons samples. Every map location is colored by the total "
@@ -811,20 +837,29 @@ with reference_tabs[1]:
             "to the deployed repository branch."
         )
 
-    st.markdown("### Plan a 24-hour observation")
+    st.markdown("### Plan 3-hour and 24-hour observations")
     st.markdown(
-        "Choose a UTC date and camera boresight. The generated map covers "
-        "midnight at the start of that date through midnight 24 hours later. "
-        "The magenta outline is a 24° × 24° TESS-like camera field projected "
-        "onto the celestial sphere and rotated by the requested roll angle."
+        "Choose one UTC start date and time. A single calculation generates "
+        "both the 3-hour and 24-hour maps using five-minute samples and the "
+        "same starting geometry. The magenta outline is a 24° × 24° TESS-like "
+        "camera field projected onto the celestial sphere and rotated by the "
+        "requested roll angle."
     )
     with st.form("daily_camera_projection_form"):
-        projection_date = st.date_input(
+        window_columns = st.columns(2)
+        projection_date = window_columns[0].date_input(
             "UTC start date",
             value=DEFAULT_DATE_RANGE[0],
             format="YYYY-MM-DD",
             key="daily_camera_projection_date",
-            help="The end of the projection is automatically 24 hours later.",
+            help="The selected interval begins on this UTC date.",
+        )
+        projection_time = window_columns[1].time_input(
+            "UTC start time",
+            value=time(0, 0),
+            step=timedelta(minutes=5),
+            key="daily_camera_projection_time",
+            help="The start time can be moved in five-minute increments.",
         )
         projection_sun_angle = st.radio(
             "Sun exclusion angle",
@@ -872,21 +907,22 @@ with reference_tabs[1]:
             ),
         )
         projection_submit = st.form_submit_button(
-            "Generate 24-hour camera projection",
+            "Generate both camera projections",
             type="primary",
         )
 
     if projection_submit:
-        if isinstance(projection_date, date):
+        if isinstance(projection_date, date) and isinstance(projection_time, time):
             run_daily_camera_projection(
                 projection_date,
+                projection_time,
                 projection_sun_angle,
                 float(camera_ra),
                 float(camera_dec),
                 float(camera_roll),
             )
         else:
-            st.error("Select a valid UTC start date.")
+            st.error("Select a valid UTC start date and time.")
     render_result("daily_camera_projection_result")
 
     st.info(
@@ -898,52 +934,60 @@ with reference_tabs[1]:
         "exactly ±90° declination, RA no longer selects a different center; "
         "RA and roll set the footprint's orientation around the pole. The "
         "dotted yellow curve marks 60° angular separation from the Sun at "
-        "12:00 UTC. It is a planning reference and does not change the "
-        "selected 30° or 45° Sun exclusion calculation."
+        "each interval's midpoint. It is a planning reference and "
+        "does not change the selected 30° or 45° Sun exclusion calculation."
     )
 
     st.markdown(
         """
         #### How to read the figure
 
-        - **Each panel represents one full UTC day**, rather than one
-          instantaneous geometry. At five-minute intervals, every fixed sky
-          direction is tested against the Earth, Moon, and Sun exclusion caps.
-        - The color of a pixel gives its **total unobscured observing time out
-          of 24 hours**. Purple and blue indicate little available time;
-          cyan and green indicate intermediate coverage; yellow, orange, and
-          red indicate progressively longer coverage.
+        - Each static comparison panel above represents one full UTC day. The
+          planning calculation generates matching **3-hour and 24-hour maps**
+          from the same start time. Both use five-minute samples, and every
+          fixed sky direction is tested against the Earth, Moon, and Sun
+          exclusion caps.
+        - The color of a pixel gives its **total unobscured observing time
+          within the selected interval**. Purple and blue indicate little
+          available time; cyan and green indicate intermediate coverage;
+          yellow, orange, and red indicate progressively longer coverage.
         - **0 hours** means the direction is inside at least one exclusion cap
-          at every sampled time. **24 hours** means it remains outside all
-          three caps for the entire sampled day. An intermediate value is the
-          sum of all available five-minute intervals and is not necessarily one
-          continuous observing window.
-        - White contour lines mark approximately **6, 12, and 18 hours** of
-          access. The color bar is fixed from 0 to 24 hours for every panel,
-          allowing direct comparisons between successive days.
+          at every sample. The selected maximum—**3 hours or 24 hours**—means
+          it remains outside all three caps for the full interval. An
+          intermediate value is the sum of available five-minute intervals and
+          is not necessarily one continuous observing window. Dividing that
+          value by the window duration gives the time-averaged visible fraction.
+        - On the static 24-hour comparison, white contour lines mark **6, 12,
+          and 18 hours**, and every panel uses the same 0–24 hour color scale.
+          On a generated map, the contours mark **25%, 50%, and 75%** of its
+          selected interval: 0.75, 1.5, and 2.25 hours for the 3-hour mode, or
+          6, 12, and 18 hours for the 24-hour mode.
         - The **blue, light-gray, and orange tracks** show the apparent center
           paths of Earth, Moon, and Sun. The circular marker identifies the
           beginning of each UTC day. The caps themselves are not drawn at one
           instant because their motion has already been accumulated into the
           coverage colors.
-        - In a generated planning map, track markers appear every **six
-          hours**. The dashed white circle explicitly shows the Moon's 20°
-          exclusion region at 12:00 UTC, making its location and scale easier
-          to distinguish from the full-day accumulated coverage.
+        - In a generated planning map, track markers appear every **one hour
+          for a 3-hour window** or every **six hours for a 24-hour window**.
+          The dashed white circle shows the Moon's 20° exclusion region at the
+          interval midpoint, making its location and scale easier to
+          distinguish from the accumulated coverage.
         - The **magenta 24° × 24° outline** is the requested camera field. Its
           center is marked with a cross, and the figure reports mean, minimum,
           and maximum available time within that field. The roll input rotates
           this footprint about its RA/Dec center without moving the boresight.
         - The **dotted yellow curve** is the set of directions exactly 60° from
-          the Sun at 12:00 UTC. The region toward the Sun inside that curve
-          highlights sky that is generally difficult for nighttime ground
-          observatories. Directions outside the selected 30° or 45° Sun
-          exclusion may still be available to the GEO camera. The 60° curve
-          is a visual planning guide only and is not another exclusion cap.
+          the Sun at the interval midpoint. The region toward the Sun inside
+          that curve highlights sky that is generally difficult for nighttime
+          ground observatories. Directions outside the selected 30° or 45°
+          Sun exclusion may still be available to the GEO camera. The 60°
+          curve is a visual planning guide only and is not another exclusion
+          cap.
         - **Sky-mean access** is the solid-angle-weighted average number of
-          available hours over the entire celestial sphere. **Continuous 24 h
-          access** is the percentage of the full sky that remains unobscured
-          at every sample during that day.
+          available hours over the entire celestial sphere. **Continuous
+          full-window access** is the percentage of the full sky that remains
+          unobscured at every sample during the selected 3-hour or 24-hour
+          interval.
         - Right ascension is labeled in hours and increases toward the left,
           following astronomical sky-map convention. The two outer edges meet
           at the same celestial seam.
@@ -959,11 +1003,11 @@ with reference_tabs[1]:
 
         GOES-18 remains near its geostationary longitude, but its position and
         the Earth-pointing direction rotate in an inertial celestial frame.
-        During each day, the Earth exclusion cap sweeps around the sky while
-        the apparent Moon and Sun directions also change. A pixel accumulates
-        observing time only while none of those moving caps covers it. The
-        Moon and Sun geometry changes from one date to the next, which is why
-        the daily intensity pattern evolves across the panels.
+        During the selected interval, the Earth exclusion cap sweeps across
+        the sky while the apparent Moon and Sun directions also change. A
+        pixel accumulates observing time only while none of those moving caps
+        covers it. The Moon and Sun geometry changes with date and time, which
+        is why the intensity pattern evolves between intervals.
 
         #### Why use a Mollweide projection?
 

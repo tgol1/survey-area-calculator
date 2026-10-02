@@ -511,7 +511,7 @@ def write_comparison_plot(
     axis.set_xlabel("Hour of day (UTC): 1 = 00:00, 24 = 23:00")
     axis.set_ylabel("Visible sky (%)")
     figure.suptitle(
-        "GOES-18 daily visible-sky variation across two 14-day windows",
+        "NEO daily visible-sky variation across two 14-day windows",
         x=0.065,
         ha="left",
         fontsize=15,

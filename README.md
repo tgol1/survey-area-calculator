@@ -1,7 +1,7 @@
-## Survey Area Calculator v5.3
+## Survey Area Calculator v5.4
 George Tolis
 
-Last updated: 30 September 2026
+Last updated: 2 October 2026
 
 ## Changelog
 Every new version number represents completion of additional assignments for project.
@@ -64,6 +64,10 @@ v5.2 - 28 September 2026
 
 v5.3 - 30 September 2026
 - Added camera roll angle selection to sky projection visualization
+
+v5.4 - 2 October 2026
+- Added 3-hour cumulative sky-survey map in addition to 24-hour map
+- Mentions of "GOES-18" are now "NEO"
 
 ## Function
 Script computes the instantaneous visible fraction of sky from GOES-18 - a satellite positioned at 137W around Hawaii.
