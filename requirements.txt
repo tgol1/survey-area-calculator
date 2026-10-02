@@ -3,3 +3,4 @@ numpy
 matplotlib
 astropy
 sgp4
+imageio-ffmpeg

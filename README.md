@@ -1,4 +1,4 @@
-## Visible-Sky Calculator v5.4
+## Visible-Sky Calculator v6
 George Tolis
 
 Last updated: 2 October 2026
@@ -65,9 +65,11 @@ v5.2 - 28 September 2026
 v5.3 - 30 September 2026
 - Added camera roll angle selection to sky projection visualization
 
-v5.4 - 2 October 2026
+v6 - 2 October 2026
 - Added 3-hour cumulative sky-survey map in addition to 24-hour map
 - Mentions of "GOES-18" are now "NEO"
+- Added downloadable .mp4 files showing changes in visible sky over 6 month and 48 hour periods
+
 
 ## Function
 Script computes the instantaneous visible fraction of sky from GOES-18 - a satellite positioned at 137W around Hawaii.
