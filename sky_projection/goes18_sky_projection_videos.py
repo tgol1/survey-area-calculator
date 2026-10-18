@@ -48,6 +48,7 @@ DEFAULT_SIX_MONTH_OUTPUT = (
 DEFAULT_48_HOUR_OUTPUT = SCRIPT_DIRECTORY / "neo_48h_3h_sky_coverage.mp4"
 LONG_WINDOW_HOURS = 24
 MAX_EPHEMERIS_SAMPLES_PER_BATCH = 8_000
+VIDEO_SCRIPT_VERSION = "2026-10-18-no-clabel-v2"
 
 try:
     from sky_projection.goes18_daily_camera_projection import (
@@ -526,7 +527,7 @@ def render_frame(
         rasterized=True,
         zorder=0,
     )
-    contours = axis.contour(
+    axis.contour(
         longitude_grid,
         latitude_grid,
         coverage_hours,
@@ -538,13 +539,8 @@ def render_frame(
         alpha=0.58,
         zorder=2,
     )
-    axis.clabel(
-        contours,
-        fmt=lambda value: f"{value:g} h",
-        inline=True,
-        fontsize=6.8,
-        colors="white",
-    )
+    # Matplotlib's clabel() can crash on contours crossing the Mollweide
+    # seam. Keep the contour lines and describe their fixed levels below.
 
     sample_count = len(next(iter(body_vectors.values())))
     marker_interval_hours = 1 if window_hours == 3 else 6
@@ -745,8 +741,9 @@ def render_frame(
     figure.text(
         0.015,
         0.018,
-        f"Five-minute integration; Earth limb + {earth_clearance_deg:g}°; "
-        f"observer = {observer_name}; RA increases left.\n"
+        f"Five-minute integration; white contours = 25%, 50%, and 75%; "
+        f"Earth limb + {earth_clearance_deg:g}°; observer = {observer_name}; "
+        "RA increases left.\n"
         "Dotted yellow = 60° Sun guide; dashed white = Moon cap at the "
         "frame midpoint.",
         ha="left",
@@ -962,6 +959,7 @@ def main() -> int:
 
         print(
             "GOES-18 NEO sky-coverage video generation\n"
+            f"Video script version: {VIDEO_SCRIPT_VERSION}\n"
             f"Start: {start_datetime:%Y-%m-%d %H:%M} UTC\n"
             f"Sun exclusion: {sun_exclusion:g} degrees\n"
             f"Ephemeris source: {args.ephemeris_source}\n"

@@ -951,7 +951,7 @@ def write_figure(
     contour_levels = tuple(
         float(window_hours) * fraction for fraction in (0.25, 0.50, 0.75)
     )
-    contours = axis.contour(
+    axis.contour(
         longitude_grid,
         latitude_grid,
         coverage_hours,
@@ -961,13 +961,9 @@ def write_figure(
         alpha=0.56,
         zorder=2,
     )
-    axis.clabel(
-        contours,
-        fmt=lambda value: f"{value:g} h",
-        inline=True,
-        fontsize=7.0,
-        colors="white",
-    )
+    # Do not call Matplotlib's clabel() here. Some releases crash when a
+    # contour crosses the Mollweide seam. The colorbar and footer identify
+    # the levels without modifying the wrapped contour paths.
 
     sample_count = len(next(iter(body_vectors.values())))
     marker_interval_hours = 1 if window_hours == 3 else 6
@@ -1157,7 +1153,8 @@ def write_figure(
     figure.text(
         0.018,
         0.025,
-        f"Color = accumulated unobscured time. Tracks and {marker_interval_hours}-hour "
+        f"Color = accumulated unobscured time; white contours = 25%, 50%, "
+        f"and 75% of the interval. Tracks and {marker_interval_hours}-hour "
         "markers show body motion.\n"
         f"Dashed white Moon cap and dotted yellow 60° Sun guide use the interval "
         f"midpoint ({midpoint_label}); the Sun guide is not an added exclusion.\n"
