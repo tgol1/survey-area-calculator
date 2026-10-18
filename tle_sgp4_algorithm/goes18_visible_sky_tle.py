@@ -2,18 +2,19 @@
 """Calculate GOES-18 sky visibility with a TLE/SGP4 spacecraft trajectory.
 
 GOES-18 is propagated locally with the standard SGP4 model and the SGP4 TEME
-position is transformed to GCRS with Astropy.  By default, matching geometric
-ICRF Moon and Sun vectors are downloaded from JPL Horizons with Earth's center
-as the observer.  Subtracting the TLE/SGP4 GOES-18 position produces the
-observer-relative vectors used by the visibility calculation.  This keeps the
-solar-system model aligned with the Horizons algorithm while preserving the
-TLE/SGP4 spacecraft trajectory that the comparison is intended to test.
+position is transformed to GCRS with Astropy.  By default, Astropy's built-in
+analytical ephemeris generates the geocentric Moon and Sun vectors locally, so
+future-planning calculations do not depend on a JPL Horizons spacecraft
+archive.  Subtracting the TLE/SGP4 GOES-18 position produces the
+observer-relative Earth, Moon, and Sun vectors used by the visibility
+calculation.
 
-An Astropy built-in Moon/Sun ephemeris remains available as an explicitly
-selected offline option.  When Space-Track credentials are configured, the
-program downloads GP_HISTORY records around the requested dates and propagates
-every sample with the nearest TLE epoch.  Otherwise it uses CelesTrak's latest
-TLE and retains the bundled element set as an offline fallback.
+When Space-Track credentials are configured, past calculations use GP_HISTORY
+records near the requested dates.  Future calculations use the newest
+available GOES-18 element set from Space-Track or CelesTrak and are never
+stopped solely because that TLE becomes old.  The epoch distance is still
+reported and a warning is emitted because computational reach is not an
+accuracy guarantee.
 
 This file reuses the tested spherical-cap geometry, adaptive angular sampling,
 CSV writer, and plot writer from ``goes18_visible_sky.py``.  Keep both Python
@@ -93,6 +94,7 @@ DEFAULT_FALLBACK_TLE_FILE = Path(__file__).with_name("goes18_2026-08-27.tle")
 DEFAULT_TLE_CACHE_DIR = Path(__file__).with_name("tle_cache")
 HISTORICAL_QUERY_PADDING_DAYS = 7
 HORIZONS_BODY_BATCH_SAMPLES = 9000
+MAX_BUILTIN_EPHEMERIS_DATE = datetime(2099, 12, 31, tzinfo=timezone.utc).date()
 
 
 @dataclass(frozen=True)
@@ -266,6 +268,35 @@ def fetch_historical_tles(
     return records
 
 
+def fetch_latest_spacetrack_tle(
+    identity: str,
+    password: str,
+) -> list[TLERecord]:
+    """Download the newest GOES-18 GP element set from Space-Track."""
+    login_url = f"{SPACE_TRACK_BASE_URL}/ajaxauth/login"
+    query_url = (
+        f"{SPACE_TRACK_BASE_URL}/basicspacedata/query/class/gp/"
+        f"NORAD_CAT_ID/{GOES18_NORAD_ID}/orderby/EPOCH%20desc/"
+        "limit/1/format/tle/emptyresult/show"
+    )
+    opener = build_opener(HTTPCookieProcessor(CookieJar()))
+    login_data = urlencode({"identity": identity, "password": password}).encode()
+    headers = {"User-Agent": "GOES18-TLE-sky/2.0"}
+    try:
+        login_request = Request(login_url, data=login_data, headers=headers)
+        with opener.open(login_request, timeout=45) as response:
+            login_reply = response.read().decode("utf-8", errors="replace")
+        if "failed" in login_reply.lower() or "invalid" in login_reply.lower():
+            raise RuntimeError("Space-Track rejected the configured credentials.")
+        with opener.open(Request(query_url, headers=headers), timeout=60) as response:
+            text = response.read().decode("ascii")
+    except (HTTPError, URLError, TimeoutError, UnicodeDecodeError, OSError) as exc:
+        raise RuntimeError(
+            f"Could not download the latest Space-Track TLE: {exc}"
+        ) from exc
+    return parse_tle_records(text, query_url)
+
+
 def load_tle_records(
     path: Path | None,
     url: str,
@@ -279,17 +310,45 @@ def load_tle_records(
     if path is not None:
         return read_tle_file(path), str(path.resolve())
 
+    requested_stop = datetime.strptime(stop, "%Y-%m-%d").date()
+    future_requested = requested_stop > datetime.now(timezone.utc).date()
+
     if source_mode in {"auto", "space-track"}:
         credentials = space_track_credentials()
         if credentials is None:
-            message = (
-                "Space-Track credentials are not configured. Set "
-                f"{SPACE_TRACK_IDENTITY_ENV} and {SPACE_TRACK_PASSWORD_ENV} "
-                "to retrieve historical TLEs near the requested dates."
-            )
             if source_mode == "space-track":
-                raise RuntimeError(message)
+                raise RuntimeError(
+                    "Space-Track credentials are not configured. Set "
+                    f"{SPACE_TRACK_IDENTITY_ENV} and "
+                    f"{SPACE_TRACK_PASSWORD_ENV}, or use "
+                    "--tle-source celestrak for the newest public TLE."
+                )
+            if future_requested:
+                message = (
+                    "Space-Track credentials are not configured. The newest "
+                    "CelesTrak GOES-18 TLE will be used for future planning."
+                )
+            else:
+                message = (
+                    "Space-Track credentials are not configured. Set "
+                    f"{SPACE_TRACK_IDENTITY_ENV} and {SPACE_TRACK_PASSWORD_ENV} "
+                    "to retrieve historical TLEs near the requested dates."
+                )
             print(message)
+        elif future_requested:
+            print(
+                "Future planning date detected; downloading the newest "
+                "GOES-18 TLE from Space-Track instead of querying GP_HISTORY."
+            )
+            try:
+                return (
+                    fetch_latest_spacetrack_tle(*credentials),
+                    "Space-Track latest GP element set",
+                )
+            except (RuntimeError, ValueError) as latest_error:
+                if source_mode == "space-track":
+                    raise
+                print(f"Latest Space-Track TLE download failed: {latest_error}")
         else:
             print("Downloading date-matched GOES-18 TLE history from Space-Track...")
             try:
@@ -403,21 +462,42 @@ def enforce_tle_age_limit(
     tle_source: str,
     allow_stale_tle: bool,
 ) -> float:
-    """Reject stale propagation unless the user explicitly accepts it."""
+    """Warn for stale future propagation and guard stale historical results."""
     epochs_jd = np.asarray([tle_epoch_jd(item) for item in satellites])
     selected_epochs = epochs_jd[selected_tle_indices]
-    age_days = np.abs(np.asarray(times.utc.jd) - selected_epochs)
+    requested_jd = np.asarray(times.utc.jd)
+    age_days = np.abs(requested_jd - selected_epochs)
     maximum_age = float(np.max(age_days))
-    if maximum_age > max_age_days:
+    stale = age_days > max_age_days
+    now_jd = float(Time(datetime.now(timezone.utc), scale="utc").utc.jd)
+    future_stale = stale & (requested_jd > now_jd)
+    historical_stale = stale & ~future_stale
+
+    if np.any(future_stale):
+        maximum_future_age = float(np.max(age_days[future_stale]))
+        warnings.warn(
+            "Future planning samples extend as far as "
+            f"{maximum_future_age:.1f} days from their selected GOES-18 TLE "
+            "epoch. Future propagation is allowed automatically, but the "
+            "trajectory can drift because SGP4 cannot predict unmodeled "
+            "station-keeping maneuvers. Refresh the calculation with a newer "
+            "TLE before operational use.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+
+    if np.any(historical_stale):
+        maximum_historical_age = float(np.max(age_days[historical_stale]))
         message = (
             "No sufficiently date-matched GOES-18 TLE is available. The "
-            f"farthest requested sample is {maximum_age:.1f} days from its "
+            "farthest historical sample is "
+            f"{maximum_historical_age:.1f} days from its "
             f"nearest TLE epoch, exceeding the {max_age_days:g}-day limit.\n"
             f"Selected TLE source: {tle_source}\n"
             "Historical calculations require Space-Track GP_HISTORY data. "
             f"Set {SPACE_TRACK_IDENTITY_ENV} and {SPACE_TRACK_PASSWORD_ENV}, "
             "or provide a historical file with --tle-file. The script is "
-            "stopping instead of producing a misleading JPL comparison."
+            "stopping instead of producing a misleading historical result."
         )
         if not allow_stale_tle:
             raise SystemExit(message)
@@ -505,16 +585,16 @@ def propagate_tle_ephemeris(
     datetimes: list[datetime],
     satellites: list[Satrec],
     selected_tle_indices: np.ndarray,
-    body_ephemeris: str = "horizons",
+    body_ephemeris: str = "astropy-builtin",
 ) -> dict[str, np.ndarray | Time]:
     """Generate GOES-18 and Earth/Moon/Sun vectors on the UTC time grid.
 
     SGP4 returns GOES-18 coordinates in TEME.  Astropy converts the spacecraft
-    position to GCRS.  By default, Horizons supplies matching geometric ICRF
-    Moon and Sun positions relative to Earth's center; ``astropy-builtin`` is
-    available for offline operation.  Subtracting the GOES-18 position from
-    those geocentric vectors produces the observer-relative vectors used by
-    the sky geometry calculation.
+    position to GCRS.  By default, Astropy's built-in analytical ephemeris
+    supplies geocentric GCRS Moon and Sun positions without a JPL request;
+    ``horizons`` remains available for validation. Subtracting the GOES-18
+    position from those geocentric vectors produces the observer-relative
+    vectors used by the sky geometry calculation.
     """
     times = Time(datetimes, scale="utc")
     sample_count = len(datetimes)
@@ -549,8 +629,8 @@ def propagate_tle_ephemeris(
     # Hosted/offline environments can have a bundled IERS-A table whose
     # predictive rows are older than Astropy's default 30-day freshness
     # limit. Allow those bundled rows instead of failing the TEME-to-GCRS
-    # transformation. This affects Earth-orientation interpolation only; it
-    # does not remove the need to propagate close to the TLE epoch.
+    # transformation. This affects Earth-orientation interpolation only and
+    # does not improve the physical accuracy of a stale TLE propagation.
     iers.conf.auto_max_age = None
     teme_coordinates = TEME(
         CartesianRepresentation(teme_position.T * u.km),
@@ -686,7 +766,7 @@ def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Calculate GOES-18 visible sky using a TLE/SGP4 spacecraft "
-            "trajectory and JPL Horizons Earth/Moon/Sun ephemerides."
+            "trajectory and locally generated Earth/Moon/Sun ephemerides."
         )
     )
     parser.add_argument(
@@ -750,25 +830,27 @@ def parse_arguments() -> argparse.Namespace:
         type=float,
         default=DEFAULT_MAX_TLE_AGE_DAYS,
         help=(
-            "Reject a requested time more than this many days from its nearest "
-            "TLE epoch unless --allow-stale-tle is set (default: 14)"
+            "Reject a historical time more than this many days from its nearest "
+            "TLE epoch unless --allow-stale-tle is set. Future dates are always "
+            "allowed with a warning (default: 14)"
         ),
     )
     parser.add_argument(
         "--allow-stale-tle",
         action="store_true",
         help=(
-            "Allow propagation beyond --max-tle-age. This is intended only "
-            "for diagnostics and can produce inaccurate comparisons."
+            "Allow stale historical propagation beyond --max-tle-age. Future "
+            "planning dates do not require this flag."
         ),
     )
     parser.add_argument(
         "--body-ephemeris",
         choices=("horizons", "astropy-builtin"),
-        default="horizons",
+        default="astropy-builtin",
         help=(
-            "Geocentric Moon/Sun model. 'horizons' matches the JPL algorithm "
-            "(default); 'astropy-builtin' is an offline analytical fallback"
+            "Geocentric Moon/Sun model. 'astropy-builtin' is the local "
+            "future-planning default; 'horizons' is retained for method "
+            "comparison"
         ),
     )
     parser.add_argument(
@@ -827,6 +909,17 @@ def main() -> None:
     start, stop = validate_date_range(start, stop)
     sun_exclusion = args.sun_exclusion or prompt_for_sun_exclusion()
     coarse_step_minutes = step_to_minutes(args.step)
+
+    stop_date = datetime.strptime(stop, "%Y-%m-%d").date()
+    if (
+        args.body_ephemeris == "astropy-builtin"
+        and stop_date > MAX_BUILTIN_EPHEMERIS_DATE
+    ):
+        raise SystemExit(
+            "Local future planning is supported through "
+            f"{MAX_BUILTIN_EPHEMERIS_DATE.isoformat()}. Choose an earlier "
+            "end date."
+        )
 
     for label, clearance in (
         ("Earth", args.earth_clearance),

@@ -1,7 +1,7 @@
-## Visible-Sky Calculator v6
+## Visible-Sky Calculator v6.1
 George Tolis
 
-Last updated: 2 October 2026
+Last updated: 18 October 2026
 
 ## Changelog
 Every new version number represents completion of additional assignments for project.
@@ -69,6 +69,9 @@ v6 - 2 October 2026
 - Added 3-hour cumulative sky-survey map in addition to 24-hour map
 - Mentions of "GOES-18" are now "NEO"
 - Added downloadable .mp4 files showing changes in visible sky over 6 month and 48 hour periods
+
+v6.1 - 18 October 2026
+- Removed restriction for visible sky predictions in the future.
 
 
 ## Function

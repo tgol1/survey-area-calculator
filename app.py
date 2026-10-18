@@ -56,6 +56,14 @@ DEFAULT_DAILY_WINDOW_1 = (date(2026, 1, 1), date(2026, 1, 15))
 DEFAULT_DAILY_WINDOW_2 = (date(2026, 8, 1), date(2026, 8, 15))
 DEFAULT_RANDOM_POOL = (date(2026, 1, 1), date(2027, 1, 1))
 DAILY_WINDOW_DAYS = 14
+TLE_PLANNING_MAX_DATE = date(2099, 12, 31)
+TLE_CAMERA_MAX_START_DATE = date(2099, 12, 30)
+TLE_VIDEO_MAX_START_DATE = date(2099, 6, 30)
+DEFAULT_TLE_START_DATE = min(date.today(), TLE_CAMERA_MAX_START_DATE)
+DEFAULT_TLE_DATE_RANGE = (
+    DEFAULT_TLE_START_DATE,
+    min(DEFAULT_TLE_START_DATE + timedelta(days=2), TLE_PLANNING_MAX_DATE),
+)
 
 
 st.set_page_config(
@@ -487,6 +495,8 @@ def run_tle(start: date, stop: date, sun_angle: int) -> None:
             stop.isoformat(),
             "--sun-exclusion",
             str(sun_angle),
+            "--body-ephemeris",
+            "astropy-builtin",
             "--output-prefix",
             str(prefix),
         ]
@@ -693,10 +703,11 @@ def run_daily_camera_projection(
     camera_dec: float,
     camera_roll: float,
 ) -> None:
-    """Generate matching 3-hour and 24-hour maps from one JPL download."""
+    """Generate matching 3-hour and 24-hour maps from local TLE propagation."""
     if not required_files_exist(
         [
             DAILY_CAMERA_PROJECTION_SCRIPT,
+            TLE_SCRIPT,
             HORIZONS_SCRIPT,
         ]
     ):
@@ -712,6 +723,8 @@ def run_daily_camera_projection(
             start_date.isoformat(),
             "--start-time",
             start_time.strftime("%H:%M"),
+            "--ephemeris-source",
+            "tle",
             "--both-windows",
             "--sun-exclusion",
             str(sun_angle),
@@ -727,8 +740,8 @@ def run_daily_camera_projection(
             str(output_24h),
         ]
         with st.spinner(
-            "Downloading one 24-hour JPL ephemeris set at five-minute cadence "
-            "and generating both planning maps..."
+            "Loading the latest GOES-18 TLE, propagating it with SGP4 at "
+            "five-minute cadence, and generating both planning maps..."
         ):
             return_code, log = run_command(command)
 
@@ -786,11 +799,12 @@ def run_sky_projection_videos(
     camera_dec: float,
     camera_roll: float,
 ) -> None:
-    """Generate both requested JPL sky-coverage MP4 products."""
+    """Generate both requested TLE/SGP4 sky-coverage MP4 products."""
     if not required_files_exist(
         [
             SKY_PROJECTION_VIDEO_SCRIPT,
             DAILY_CAMERA_PROJECTION_SCRIPT,
+            TLE_SCRIPT,
             HORIZONS_SCRIPT,
         ]
     ):
@@ -806,6 +820,8 @@ def run_sky_projection_videos(
             start_date.isoformat(),
             "--start-time",
             start_time.strftime("%H:%M"),
+            "--ephemeris-source",
+            "tle",
             "--sun-exclusion",
             str(sun_angle),
             "--camera-ra",
@@ -910,7 +926,7 @@ with reference_tabs[1]:
     st.markdown("### NEO daily sky-survey coverage")
     st.markdown(
         "Each Mollweide panel combines one complete UTC day of five-minute "
-        "JPL Horizons samples. Every map location is colored by the total "
+        "samples. Every map location is colored by the total "
         "time that direction remains outside the moving Earth, Moon, and Sun "
         "exclusion regions."
     )
@@ -946,13 +962,21 @@ with reference_tabs[1]:
         "both the 3-hour and 24-hour maps using five-minute samples and the "
         "same starting geometry. The magenta outline is a 24° × 24° TESS-like "
         "camera field projected onto the celestial sphere and rotated by the "
-        "requested roll angle."
+        "requested roll angle. GOES-18 is propagated from the newest available "
+        "TLE with SGP4; Moon and Sun positions are generated locally."
+    )
+    st.info(
+        "Future dates are allowed through 2099-12-31. The calculation reports "
+        "the distance from the selected TLE epoch and continues with a warning "
+        "when the TLE is stale. Refresh the plan with a newer TLE before "
+        "operational use."
     )
     with st.form("daily_camera_projection_form"):
         window_columns = st.columns(2)
         projection_date = window_columns[0].date_input(
             "UTC start date",
-            value=DEFAULT_DATE_RANGE[0],
+            value=DEFAULT_TLE_START_DATE,
+            max_value=TLE_CAMERA_MAX_START_DATE,
             format="YYYY-MM-DD",
             key="daily_camera_projection_date",
             help="The selected interval begins on this UTC date.",
@@ -1135,7 +1159,7 @@ with reference_tabs[2]:
         "The first follows six calendar months using one 24-hour integrated "
         "map every two days. The second follows the first 48 hours using "
         "non-overlapping 3-hour maps. Every map is calculated from five-minute "
-        "JPL Horizons samples."
+        "TLE/SGP4 samples with locally generated Moon and Sun positions."
     )
     st.info(
         "The six-month animation contains about 90 full-sky calculations and "
@@ -1147,7 +1171,8 @@ with reference_tabs[2]:
         video_time_columns = st.columns(2)
         video_start_date = video_time_columns[0].date_input(
             "UTC video start date",
-            value=DEFAULT_DATE_RANGE[0],
+            value=min(DEFAULT_TLE_START_DATE, TLE_VIDEO_MAX_START_DATE),
+            max_value=TLE_VIDEO_MAX_START_DATE,
             format="YYYY-MM-DD",
             key="sky_projection_video_date",
         )
@@ -1284,19 +1309,23 @@ with method_tabs[1]:
         "The TLE algorithm now selects element sets by date. With Space-Track "
         "credentials configured, it downloads GP_HISTORY records around the "
         "requested range and uses the nearest TLE epoch for every sample. "
-        "Without credentials it uses CelesTrak's latest TLE and reports how "
-        "far the requested samples are from that epoch."
+        "For future planning it uses the newest available GOES-18 TLE, permits "
+        "propagation through 2099-12-31, and reports how far every requested "
+        "sample is from that epoch. Moon and Sun positions are generated "
+        "locally rather than downloaded from JPL."
     )
     if not has_spacetrack_credentials():
         st.warning(
             "Historical TLE lookup is not configured on this deployment. Add "
             "SPACETRACK_IDENTITY and SPACETRACK_PASSWORD to Streamlit secrets "
-            "for accurate calculations on dates far from the current TLE epoch."
+            "for historical calculations far from the current TLE epoch. "
+            "Future planning still works using CelesTrak's latest TLE."
         )
     with st.form("tle_form"):
         tle_dates = st.date_input(
             "UTC date range",
-            value=DEFAULT_DATE_RANGE,
+            value=DEFAULT_TLE_DATE_RANGE,
+            max_value=TLE_PLANNING_MAX_DATE,
             format="YYYY-MM-DD",
             key="tle_dates",
         )

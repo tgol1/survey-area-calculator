@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Create a GOES-18 survey-coverage map with a camera footprint.
+"""Create a future-planning GOES-18 survey map with a camera footprint.
 
 The map integrates a 3-hour interval, a 24-hour interval, or both at
 five-minute cadence.  For every sample, a fixed celestial direction is considered
@@ -11,7 +11,9 @@ A 24 degree by 24 degree TESS-like camera field is projected from a requested
 right ascension and declination.  The field is constructed in the tangent
 plane of the pointing direction, rather than drawn as a rectangle in plot
 coordinates, so the outline correctly distorts near the celestial poles and
-the Mollweide seam.
+the Mollweide seam.  The default planning path propagates GOES-18 from the
+newest available TLE with SGP4 and generates Sun/Moon vectors locally with
+Astropy.  JPL Horizons remains available only as an optional validation mode.
 """
 
 from __future__ import annotations
@@ -28,6 +30,7 @@ import matplotlib.patheffects as path_effects
 from matplotlib.lines import Line2D
 import matplotlib.pyplot as plt
 import numpy as np
+from astropy.time import Time
 
 
 SCRIPT_DIRECTORY = Path(__file__).resolve().parent
@@ -39,6 +42,7 @@ UTC = timezone.utc
 DEFAULT_OUTPUT = SCRIPT_DIRECTORY / "goes18_daily_camera_projection.png"
 DEFAULT_OUTPUT_3H = SCRIPT_DIRECTORY / "goes18_3h_camera_projection.png"
 DEFAULT_OUTPUT_24H = SCRIPT_DIRECTORY / "goes18_24h_camera_projection.png"
+MAX_PLANNING_DATE = date(2099, 12, 31)
 CAMERA_COLOR = "#FF2D95"
 TRACK_COLORS = {
     "Earth": "#2563EB",
@@ -56,11 +60,25 @@ try:
         fetch_vectors,
         horizons_calendar_to_utc,
     )
+    from tle_sgp4_algorithm.goes18_visible_sky_tle import (
+        CELESTRAK_TLE_URL,
+        DEFAULT_FALLBACK_TLE_FILE,
+        DEFAULT_MAX_TLE_AGE_DAYS,
+        DEFAULT_TLE_CACHE_DIR,
+        TLERecord,
+        enforce_tle_age_limit,
+        load_tle_records,
+        nearest_tle_indices,
+        propagate_tle_ephemeris,
+    )
 except ModuleNotFoundError as exc:
     raise SystemExit(
-        "Could not import horizons_api_algorithm.goes18_visible_sky. Place "
-        "this script in the repository's sky_projection folder."
+        "Could not import the repository's Horizons and TLE/SGP4 modules. "
+        "Place this script in the repository's sky_projection folder."
     ) from exc
+
+
+_TLE_RECORD_CACHE: dict[tuple[str, ...], tuple[list[TLERecord], str]] = {}
 
 
 @dataclass(frozen=True)
@@ -222,10 +240,64 @@ def parse_arguments() -> argparse.Namespace:
         help="Moon-center exclusion radius (default: 20 deg)",
     )
     parser.add_argument(
+        "--ephemeris-source",
+        choices=("tle", "horizons"),
+        default="tle",
+        help=(
+            "Spacecraft ephemeris source. 'tle' propagates locally with SGP4 "
+            "and is the future-planning default; 'horizons' is optional"
+        ),
+    )
+    parser.add_argument(
+        "--tle-file",
+        type=Path,
+        help="Optional local GOES-18 TLE file; may contain multiple records",
+    )
+    parser.add_argument(
+        "--tle-source",
+        choices=("auto", "space-track", "celestrak"),
+        default="auto",
+        help="Online TLE source when --tle-file is omitted (default: auto)",
+    )
+    parser.add_argument(
+        "--tle-url",
+        default=CELESTRAK_TLE_URL,
+        help="Current GOES-18 CelesTrak TLE URL",
+    )
+    parser.add_argument(
+        "--fallback-tle-file",
+        type=Path,
+        default=DEFAULT_FALLBACK_TLE_FILE,
+        help="Local TLE used if the online download fails",
+    )
+    parser.add_argument(
+        "--tle-cache-dir",
+        type=Path,
+        default=DEFAULT_TLE_CACHE_DIR,
+        help="Directory for cached Space-Track history responses",
+    )
+    parser.add_argument(
+        "--max-tle-age",
+        type=float,
+        default=DEFAULT_MAX_TLE_AGE_DAYS,
+        help=(
+            "Historical TLE age limit in days. Future dates continue "
+            "automatically with a warning (default: 14)"
+        ),
+    )
+    parser.add_argument(
+        "--allow-stale-tle",
+        action="store_true",
+        help="Allow stale historical TLEs; future dates need no override",
+    )
+    parser.add_argument(
         "--observer-spk",
         type=int,
         default=GOES18_SPK_ID,
-        help=f"Horizons observer SPK ID (default: {GOES18_SPK_ID})",
+        help=(
+            "Horizons observer SPK ID, used only with "
+            f"--ephemeris-source horizons (default: {GOES18_SPK_ID})"
+        ),
     )
     parser.add_argument(
         "--longitude-points",
@@ -313,6 +385,8 @@ def validate_arguments(
         raise ValueError("--earth-clearance must be between 0 and 60 degrees.")
     if not 0.0 <= args.moon_clearance <= 60.0:
         raise ValueError("--moon-clearance must be between 0 and 60 degrees.")
+    if args.max_tle_age <= 0.0:
+        raise ValueError("--max-tle-age must be positive.")
     if args.longitude_points < 181 or args.latitude_points < 91:
         raise ValueError("The sky grid is too coarse; use at least 181 x 91.")
     if args.dpi < 72:
@@ -324,6 +398,15 @@ def validate_arguments(
             raise ValueError("--output-3h and --output-24h must be different paths.")
     camera_roll = (args.camera_roll + 180.0) % 360.0 - 180.0
     start_datetime = datetime.combine(start_date, start_time, tzinfo=UTC)
+    planning_stop = start_datetime + timedelta(hours=max(windows))
+    if (
+        args.ephemeris_source == "tle"
+        and planning_stop.date() > MAX_PLANNING_DATE
+    ):
+        raise ValueError(
+            "Local TLE planning maps are supported through "
+            f"{MAX_PLANNING_DATE.isoformat()}."
+        )
     return (
         start_datetime,
         windows,
@@ -334,7 +417,7 @@ def validate_arguments(
     )
 
 
-def fetch_ephemeris(
+def _fetch_horizons_ephemeris(
     start_datetime: datetime,
     window_hours: int,
     step_minutes: int,
@@ -396,6 +479,145 @@ def fetch_ephemeris(
         sun_vectors_km=fetched["Sun"][2],
         observer_name=observer_name,
     )
+
+
+def _planning_tle_records(
+    start_datetime: datetime,
+    stop_datetime: datetime,
+    tle_file: Path | None,
+    tle_url: str,
+    fallback_tle_file: Path,
+    tle_source: str,
+    tle_cache_dir: Path,
+) -> tuple[list[TLERecord], str]:
+    """Load TLE records once per process for a planning sequence."""
+    future_request = stop_datetime.date() > datetime.now(UTC).date()
+    range_token = (
+        "future"
+        if future_request and tle_file is None
+        else f"{start_datetime:%Y-%m-%d}:{stop_datetime:%Y-%m-%d}"
+    )
+    key = (
+        str(tle_file.expanduser().resolve()) if tle_file is not None else "",
+        tle_url,
+        str(fallback_tle_file.expanduser().resolve()),
+        tle_source,
+        str(tle_cache_dir.expanduser().resolve()),
+        range_token,
+    )
+    if key not in _TLE_RECORD_CACHE:
+        _TLE_RECORD_CACHE[key] = load_tle_records(
+            tle_file,
+            tle_url,
+            fallback_tle_file,
+            start_datetime.strftime("%Y-%m-%d"),
+            stop_datetime.strftime("%Y-%m-%d"),
+            tle_source,
+            tle_cache_dir,
+        )
+    return _TLE_RECORD_CACHE[key]
+
+
+def _fetch_tle_ephemeris(
+    start_datetime: datetime,
+    window_hours: int,
+    step_minutes: int,
+    *,
+    tle_file: Path | None,
+    tle_url: str,
+    fallback_tle_file: Path,
+    tle_source: str,
+    tle_cache_dir: Path,
+    max_tle_age: float,
+    allow_stale_tle: bool,
+) -> Ephemeris:
+    """Generate GOES-18-centered vectors locally from TLE/SGP4."""
+    stop_datetime = start_datetime + timedelta(hours=window_hours)
+    if stop_datetime.date() > MAX_PLANNING_DATE:
+        raise ValueError(
+            "Local TLE planning is supported through "
+            f"{MAX_PLANNING_DATE.isoformat()}."
+        )
+    sample_count = window_hours * 60 // step_minutes + 1
+    datetimes = [
+        start_datetime + timedelta(minutes=step_minutes * index)
+        for index in range(sample_count)
+    ]
+    records, source_label = _planning_tle_records(
+        start_datetime,
+        stop_datetime,
+        tle_file,
+        tle_url,
+        fallback_tle_file,
+        tle_source,
+        tle_cache_dir,
+    )
+    satellites = [record.satellite() for record in records]
+    times = Time(datetimes, scale="utc")
+    selected_indices = nearest_tle_indices(times, satellites)
+    maximum_age = enforce_tle_age_limit(
+        times,
+        satellites,
+        selected_indices,
+        max_tle_age,
+        source_label,
+        allow_stale_tle,
+    )
+    generated = propagate_tle_ephemeris(
+        datetimes,
+        satellites,
+        selected_indices,
+        "astropy-builtin",
+    )
+    print(f"Planning TLE source: {source_label}")
+    print(f"Maximum sample-to-TLE epoch distance: {maximum_age:.2f} days")
+    print("Moon/Sun source: Astropy built-in analytical ephemeris")
+    return Ephemeris(
+        times=tuple(datetimes),
+        earth_vectors_km=np.asarray(generated["earth_from_goes_km"]),
+        moon_vectors_km=np.asarray(generated["moon_from_goes_km"]),
+        sun_vectors_km=np.asarray(generated["sun_from_goes_km"]),
+        observer_name="GOES-18 TLE/SGP4",
+    )
+
+
+def fetch_ephemeris(
+    start_datetime: datetime,
+    window_hours: int,
+    step_minutes: int,
+    observer_spk: int = GOES18_SPK_ID,
+    *,
+    ephemeris_source: str = "tle",
+    tle_file: Path | None = None,
+    tle_url: str = CELESTRAK_TLE_URL,
+    fallback_tle_file: Path = DEFAULT_FALLBACK_TLE_FILE,
+    tle_source: str = "auto",
+    tle_cache_dir: Path = DEFAULT_TLE_CACHE_DIR,
+    max_tle_age: float = DEFAULT_MAX_TLE_AGE_DAYS,
+    allow_stale_tle: bool = False,
+) -> Ephemeris:
+    """Return planning vectors from local TLE propagation or Horizons."""
+    if ephemeris_source == "tle":
+        return _fetch_tle_ephemeris(
+            start_datetime,
+            window_hours,
+            step_minutes,
+            tle_file=tle_file,
+            tle_url=tle_url,
+            fallback_tle_file=fallback_tle_file,
+            tle_source=tle_source,
+            tle_cache_dir=tle_cache_dir,
+            max_tle_age=max_tle_age,
+            allow_stale_tle=allow_stale_tle,
+        )
+    if ephemeris_source == "horizons":
+        return _fetch_horizons_ephemeris(
+            start_datetime,
+            window_hours,
+            step_minutes,
+            observer_spk,
+        )
+    raise ValueError("ephemeris_source must be 'tle' or 'horizons'.")
 
 
 def sky_grid(
@@ -1042,6 +1264,14 @@ def main() -> int:
             window_hours=max(windows),
             step_minutes=args.step_minutes,
             observer_spk=args.observer_spk,
+            ephemeris_source=args.ephemeris_source,
+            tle_file=args.tle_file,
+            tle_url=args.tle_url,
+            fallback_tle_file=args.fallback_tle_file,
+            tle_source=args.tle_source,
+            tle_cache_dir=args.tle_cache_dir,
+            max_tle_age=args.max_tle_age,
+            allow_stale_tle=args.allow_stale_tle,
         )
         longitude_grid, latitude_grid, grid_vectors = sky_grid(
             args.longitude_points,

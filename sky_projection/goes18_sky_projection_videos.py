@@ -4,8 +4,9 @@
 The long video spans six calendar months.  Each frame is a 24-hour integrated
 sky-coverage map, and frame start times are separated by two days.  The short
 video spans 48 hours.  Each frame is a three-hour integrated map, with
-successive frame starts separated by three hours.  Every integration uses
-five-minute Earth, Moon, and Sun vectors from JPL Horizons.
+successive frame starts separated by three hours.  By default, every
+integration uses five-minute vectors generated locally from the latest
+GOES-18 TLE, SGP4, and Astropy's built-in Sun/Moon ephemeris.
 
 The videos use H.264 with a yuv420p pixel format so browsers and Streamlit can
 display them directly.  ``imageio-ffmpeg`` is preferred on hosted systems;
@@ -46,12 +47,13 @@ DEFAULT_SIX_MONTH_OUTPUT = (
 )
 DEFAULT_48_HOUR_OUTPUT = SCRIPT_DIRECTORY / "neo_48h_3h_sky_coverage.mp4"
 LONG_WINDOW_HOURS = 24
-MAX_HORIZONS_SAMPLES_PER_BATCH = 8_000
+MAX_EPHEMERIS_SAMPLES_PER_BATCH = 8_000
 
 try:
     from sky_projection.goes18_daily_camera_projection import (
         CAMERA_COLOR,
         GOES18_SPK_ID,
+        MAX_PLANNING_DATE,
         TRACK_COLORS,
         UTC,
         camera_basis,
@@ -144,10 +146,22 @@ def parse_arguments() -> argparse.Namespace:
         help="Integration cadence in minutes (default: 5)",
     )
     parser.add_argument(
+        "--ephemeris-source",
+        choices=("tle", "horizons"),
+        default="tle",
+        help=(
+            "Ephemeris source. Local TLE/SGP4 is the future-planning default; "
+            "Horizons is retained for validation"
+        ),
+    )
+    parser.add_argument(
         "--observer-spk",
         type=int,
         default=GOES18_SPK_ID,
-        help=f"Horizons observer SPK ID (default: {GOES18_SPK_ID})",
+        help=(
+            "Horizons observer SPK ID, used only with "
+            f"--ephemeris-source horizons (default: {GOES18_SPK_ID})"
+        ),
     )
     parser.add_argument(
         "--fps",
@@ -307,12 +321,12 @@ def build_short_frame_starts(
     return starts
 
 
-def group_horizons_batches(
+def group_ephemeris_batches(
     frame_starts: Iterable[datetime],
     window_hours: int,
     step_minutes: int,
 ) -> list[list[datetime]]:
-    """Group nearby frames beneath the Horizons sample limit."""
+    """Group nearby frames into bounded-memory ephemeris calculations."""
     groups: list[list[datetime]] = []
     current: list[datetime] = []
     for frame_start in frame_starts:
@@ -322,7 +336,7 @@ def group_horizons_batches(
             (candidate_stop - candidate_start).total_seconds() / 60.0
         )
         sample_count = span_minutes // step_minutes + 1
-        if current and sample_count > MAX_HORIZONS_SAMPLES_PER_BATCH:
+        if current and sample_count > MAX_EPHEMERIS_SAMPLES_PER_BATCH:
             groups.append(current)
             current = [frame_start]
         else:
@@ -786,10 +800,11 @@ def generate_video(
     camera_roll_deg: float,
     step_minutes: int,
     observer_spk: int,
+    ephemeris_source: str,
     fps: int,
 ) -> Path:
     """Fetch batched ephemerides, render the requested frames, and encode MP4."""
-    batches = group_horizons_batches(
+    batches = group_ephemeris_batches(
         frame_starts,
         window_hours,
         step_minutes,
@@ -798,7 +813,7 @@ def generate_video(
     rendered_frames = 0
     print(
         f"\nGenerating {sequence_label}: {total_frames} frames in "
-        f"{len(batches)} Horizons batch(es)...",
+        f"{len(batches)} ephemeris batch(es)...",
         flush=True,
     )
 
@@ -810,7 +825,7 @@ def generate_video(
                 (batch_stop - batch_start).total_seconds() / 3600.0
             )
             print(
-                f"Horizons batch {batch_number}/{len(batches)}: "
+                f"Ephemeris batch {batch_number}/{len(batches)}: "
                 f"{batch_start:%Y-%m-%d %H:%M} through "
                 f"{batch_stop:%Y-%m-%d %H:%M} UTC",
                 flush=True,
@@ -820,6 +835,7 @@ def generate_video(
                 window_hours=batch_hours,
                 step_minutes=step_minutes,
                 observer_spk=observer_spk,
+                ephemeris_source=ephemeris_source,
             )
 
             samples_per_window = window_hours * 60 // step_minutes
@@ -919,6 +935,19 @@ def main() -> int:
         if args.max_short_frames is not None:
             short_starts = short_starts[: args.max_short_frames]
 
+        latest_planning_sample = max(
+            long_starts[-1] + timedelta(hours=LONG_WINDOW_HOURS),
+            short_starts[-1] + timedelta(hours=args.short_window_hours),
+        )
+        if (
+            args.ephemeris_source == "tle"
+            and latest_planning_sample.date() > MAX_PLANNING_DATE
+        ):
+            raise ValueError(
+                "Local TLE planning videos are supported through "
+                f"{MAX_PLANNING_DATE.isoformat()}. Choose an earlier start date."
+            )
+
         longitude_grid, latitude_grid, grid_vectors = sky_grid(
             args.longitude_points,
             args.latitude_points,
@@ -935,6 +964,7 @@ def main() -> int:
             "GOES-18 NEO sky-coverage video generation\n"
             f"Start: {start_datetime:%Y-%m-%d %H:%M} UTC\n"
             f"Sun exclusion: {sun_exclusion:g} degrees\n"
+            f"Ephemeris source: {args.ephemeris_source}\n"
             f"Long video: {len(long_starts)} frame(s), one 24-hour map every "
             f"{args.long_spacing_days} day(s)\n"
             f"Short video: {len(short_starts)} frame(s), one "
@@ -962,6 +992,7 @@ def main() -> int:
             camera_roll_deg=camera_roll,
             step_minutes=args.step_minutes,
             observer_spk=args.observer_spk,
+            ephemeris_source=args.ephemeris_source,
             fps=args.fps,
         )
         generate_video(
@@ -982,6 +1013,7 @@ def main() -> int:
             camera_roll_deg=camera_roll,
             step_minutes=args.step_minutes,
             observer_spk=args.observer_spk,
+            ephemeris_source=args.ephemeris_source,
             fps=args.fps,
         )
     except (OSError, RuntimeError, ValueError) as exc:
