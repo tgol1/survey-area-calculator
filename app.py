@@ -799,7 +799,7 @@ def run_sky_projection_videos(
     camera_dec: float,
     camera_roll: float,
 ) -> None:
-    """Generate both requested TLE/SGP4 sky-coverage MP4 products."""
+    """Generate the fixed-camera and repeated Sun-annulus MP4 products."""
     if not required_files_exist(
         [
             SKY_PROJECTION_VIDEO_SCRIPT,
@@ -813,6 +813,8 @@ def run_sky_projection_videos(
     with tempfile.TemporaryDirectory(prefix="goes18-projection-videos-") as directory:
         six_month_mp4 = Path(directory) / "neo_6month_24h_sky_coverage.mp4"
         forty_eight_hour_mp4 = Path(directory) / "neo_48h_3h_sky_coverage.mp4"
+        annulus_scan_mp4 = Path(directory) / "neo_30h_annulus_scan.mp4"
+        annulus_pointings_csv = Path(directory) / "neo_annulus_scan_pointings.csv"
         command = [
             sys.executable,
             str(SKY_PROJECTION_VIDEO_SCRIPT),
@@ -834,10 +836,15 @@ def run_sky_projection_videos(
             str(six_month_mp4),
             "--output-48-hour",
             str(forty_eight_hour_mp4),
+            "--output-annulus-scan",
+            str(annulus_scan_mp4),
+            "--output-annulus-pointings",
+            str(annulus_pointings_csv),
         ]
         with st.spinner(
-            "Generating both MP4s. The six-month product may take several "
-            "minutes because it calculates about 90 full-sky maps..."
+            "Generating all three MP4s and the annulus pointing table. The "
+            "six-month product may take several minutes because it calculates "
+            "about 90 full-sky maps..."
         ):
             return_code, log = run_command(
                 command,
@@ -846,6 +853,8 @@ def run_sky_projection_videos(
 
         six_month_bytes = read_file_bytes(six_month_mp4)
         forty_eight_hour_bytes = read_file_bytes(forty_eight_hour_mp4)
+        annulus_scan_bytes = read_file_bytes(annulus_scan_mp4)
+        annulus_pointings_bytes = read_file_bytes(annulus_pointings_csv)
         save_result(
             "sky_projection_video_result",
             return_code,
@@ -866,6 +875,14 @@ def run_sky_projection_videos(
                         "three hours"
                     ),
                 ),
+                "annulus_scan": (
+                    annulus_scan_bytes,
+                    (
+                        "30-hour Sun-annulus scan: 15 one-hour camera fields "
+                        "followed by an exact second pass through the same "
+                        "RA, declination, and roll pointings"
+                    ),
+                ),
             },
             downloads={
                 "six_month": (
@@ -877,6 +894,16 @@ def run_sky_projection_videos(
                     forty_eight_hour_bytes,
                     "neo_48h_3h_sky_coverage.mp4",
                     "video/mp4",
+                ),
+                "annulus_scan": (
+                    annulus_scan_bytes,
+                    "neo_30h_annulus_scan.mp4",
+                    "video/mp4",
+                ),
+                "annulus_pointings": (
+                    annulus_pointings_bytes,
+                    "neo_annulus_scan_pointings.csv",
+                    "text/csv",
                 ),
             },
             statistics={},
@@ -1155,16 +1182,19 @@ with reference_tabs[1]:
 with reference_tabs[2]:
     st.markdown("### Animated NEO sky-survey coverage")
     st.markdown(
-        "Generate two browser-playable MP4s from the same starting geometry. "
+        "Generate three browser-playable MP4s from the same starting time. "
         "The first follows six calendar months using one 24-hour integrated "
         "map every two days. The second follows the first 48 hours using "
-        "non-overlapping 3-hour maps. Every map is calculated from five-minute "
-        "TLE/SGP4 samples with locally generated Moon and Sun positions."
+        "non-overlapping 3-hour maps. The third demonstrates a two-pass, "
+        "15-field camera scan of the 30°–60° solar annulus. Every map is "
+        "calculated from five-minute TLE/SGP4 samples with locally generated "
+        "Moon and Sun positions."
     )
     st.info(
         "The six-month animation contains about 90 full-sky calculations and "
-        "can take several minutes to finish. Keep this browser tab open while "
-        "the calculation is running."
+        "can take several minutes to finish. The annulus animation adds 30 "
+        "one-hour frames. Keep this browser tab open while the calculation is "
+        "running."
     )
 
     with st.form("sky_projection_video_form"):
@@ -1219,7 +1249,7 @@ with reference_tabs[2]:
             key="sky_projection_video_roll",
         )
         video_submit = st.form_submit_button(
-            "Generate both MP4s",
+            "Generate all three MP4s",
             type="primary",
         )
 
@@ -1250,9 +1280,19 @@ with reference_tabs[2]:
         - The **48-hour video** contains sixteen non-overlapping frames:
           0–3 hours, 3–6 hours, and so on through 45–48 hours. Its color scale
           runs from 0 to 3 unobscured hours.
-        - Both products use the same Sun exclusion, camera boresight, camera
+        - The **Sun-annulus scan video** uses a fixed 30° inner exclusion and
+          a 60° outer guide. It calculates 15 camera centers on the 45° annulus
+          midline, separated by 24° in Sun-centered position angle, and rotates
+          each 24° × 24° pink footprint tangent to the annulus. Each field
+          dwells for one hour.
+        - Frames 1–15 are the first clockwise pass. Frames 16–30 reuse the
+          exact same inertial RA, declination, and roll values, so frame 16
+          repeats frame 1, frame 17 repeats frame 2, and so on. The downloadable
+          CSV lists all 15 calculated pointings and both dwell intervals.
+        - The six-month and 48-hour products use the selected Sun exclusion,
+          camera boresight, camera
           roll, Earth-limb clearance, Moon exclusion, and five-minute cadence.
-        - Each frame includes Earth, Moon, and Sun tracks, the midpoint Moon
+        - Every frame includes Earth, Moon, and Sun tracks, the midpoint Moon
           exclusion, the midpoint 60° Sun guide, and the 24° × 24° camera
           footprint.
         - Playback is encoded at six frames per second. The timestamp printed

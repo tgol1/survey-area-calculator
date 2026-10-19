@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate two GOES-18 sky-coverage MP4 planning products.
+"""Generate three GOES-18 sky-coverage MP4 planning products.
 
 The long video spans six calendar months.  Each frame is a 24-hour integrated
 sky-coverage map, and frame start times are separated by two days.  The short
@@ -7,6 +7,13 @@ video spans 48 hours.  Each frame is a three-hour integrated map, with
 successive frame starts separated by three hours.  By default, every
 integration uses five-minute vectors generated locally from the latest
 GOES-18 TLE, SGP4, and Astropy's built-in Sun/Moon ephemeris.
+
+The annulus-scan video contains two consecutive passes through 15 fixed
+camera fields. Each field is centered 45 degrees from the Sun, neighboring
+fields differ by 24 degrees in Sun-centered position angle, and each field
+is held for one hour. The second 15 frames reuse the exact same inertial
+RA, declination, and roll as the first pass so asteroid images can be
+compared against an identical field of view.
 
 The videos use H.264 with a yuv420p pixel format so browsers and Streamlit can
 display them directly.  ``imageio-ffmpeg`` is preferred on hosted systems;
@@ -17,6 +24,8 @@ from __future__ import annotations
 
 import argparse
 import calendar
+import csv
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 import math
 import os
@@ -46,9 +55,19 @@ DEFAULT_SIX_MONTH_OUTPUT = (
     SCRIPT_DIRECTORY / "neo_6month_24h_sky_coverage.mp4"
 )
 DEFAULT_48_HOUR_OUTPUT = SCRIPT_DIRECTORY / "neo_48h_3h_sky_coverage.mp4"
+DEFAULT_ANNULUS_SCAN_OUTPUT = SCRIPT_DIRECTORY / "neo_30h_annulus_scan.mp4"
+DEFAULT_ANNULUS_POINTINGS_OUTPUT = (
+    SCRIPT_DIRECTORY / "neo_annulus_scan_pointings.csv"
+)
 LONG_WINDOW_HOURS = 24
+ANNULUS_INNER_RADIUS_DEG = 30.0
+ANNULUS_OUTER_RADIUS_DEG = 60.0
+ANNULUS_CENTER_RADIUS_DEG = 45.0
+ANNULUS_POINTING_COUNT = 15
+ANNULUS_PASS_COUNT = 2
+ANNULUS_DWELL_HOURS = 1
 MAX_EPHEMERIS_SAMPLES_PER_BATCH = 8_000
-VIDEO_SCRIPT_VERSION = "2026-10-18-no-clabel-v2"
+VIDEO_SCRIPT_VERSION = "2026-10-18-annulus-scan-v3"
 
 try:
     from sky_projection.goes18_daily_camera_projection import (
@@ -86,7 +105,8 @@ def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Generate a six-month 24-hour-map MP4 and a 48-hour "
-            "three-hour-map MP4 from GOES-18."
+            "three-hour-map MP4, plus a repeated 15-field Sun-annulus "
+            "scan MP4, from GOES-18."
         )
     )
     parser.add_argument(
@@ -194,6 +214,33 @@ def parse_arguments() -> argparse.Namespace:
         default=DEFAULT_48_HOUR_OUTPUT,
         help="48-hour three-hour-map MP4 output path",
     )
+    parser.add_argument(
+        "--output-annulus-scan",
+        type=Path,
+        default=DEFAULT_ANNULUS_SCAN_OUTPUT,
+        help="Thirty-hour repeated Sun-annulus scan MP4 output path",
+    )
+    parser.add_argument(
+        "--output-annulus-pointings",
+        type=Path,
+        default=DEFAULT_ANNULUS_POINTINGS_OUTPUT,
+        help="CSV output path for the 15 calculated RA/Dec/roll pointings",
+    )
+    parser.add_argument(
+        "--scan-start-position-angle",
+        type=float,
+        default=0.0,
+        help=(
+            "Sun-centered position angle of field 1 in degrees; 0 is "
+            "celestial north of the Sun (default: 0)"
+        ),
+    )
+    parser.add_argument(
+        "--scan-direction",
+        choices=("clockwise", "counterclockwise"),
+        default="clockwise",
+        help="Scan direction on the RA-left Mollweide map (default: clockwise)",
+    )
 
     # These defaults encode the assignment.  Keeping them configurable makes
     # short validation runs possible without changing production behavior.
@@ -242,7 +289,11 @@ def validate_arguments(
         raise ValueError("--moon-clearance must be between 0 and 60 degrees.")
     if args.step_minutes <= 0:
         raise ValueError("--step-minutes must be positive.")
-    for hours in (LONG_WINDOW_HOURS, args.short_window_hours):
+    for hours in (
+        LONG_WINDOW_HOURS,
+        args.short_window_hours,
+        ANNULUS_DWELL_HOURS,
+    ):
         if hours <= 0 or hours * 60 % args.step_minutes != 0:
             raise ValueError(
                 "Every integration window must be positive and evenly "
@@ -265,8 +316,18 @@ def validate_arguments(
 
     output_six_month = args.output_six_month.expanduser().resolve()
     output_48_hour = args.output_48_hour.expanduser().resolve()
-    if output_six_month == output_48_hour:
-        raise ValueError("The two MP4 output paths must be different.")
+    output_annulus_scan = args.output_annulus_scan.expanduser().resolve()
+    output_annulus_pointings = args.output_annulus_pointings.expanduser().resolve()
+    output_paths = {
+        output_six_month,
+        output_48_hour,
+        output_annulus_scan,
+        output_annulus_pointings,
+    }
+    if len(output_paths) != 4:
+        raise ValueError("All video and pointing-table output paths must differ.")
+    if not math.isfinite(args.scan_start_position_angle):
+        raise ValueError("--scan-start-position-angle must be finite.")
 
     camera_roll = (args.camera_roll + 180.0) % 360.0 - 180.0
     start_datetime = datetime.combine(start_date, start_time, tzinfo=UTC)
@@ -320,6 +381,176 @@ def build_short_frame_starts(
     if not starts:
         raise ValueError("The 48-hour sequence did not contain a full frame.")
     return starts
+
+
+@dataclass(frozen=True)
+class CameraPointing:
+    """One fixed inertial camera field in the Sun-annulus scan."""
+
+    number: int
+    position_angle_deg: float
+    right_ascension_deg: float
+    declination_deg: float
+    roll_deg: float
+
+
+def vector_to_ra_dec(vector: np.ndarray) -> tuple[float, float]:
+    """Convert one nonzero Cartesian vector to ICRF RA and declination."""
+    unit = np.asarray(vector, dtype=float).copy()
+    norm = float(np.linalg.norm(unit))
+    if norm == 0.0 or not np.isfinite(norm):
+        raise ValueError("Cannot convert an invalid vector to RA and declination.")
+    unit /= norm
+    right_ascension = math.degrees(math.atan2(unit[1], unit[0])) % 360.0
+    declination = math.degrees(math.asin(float(np.clip(unit[2], -1.0, 1.0))))
+    return right_ascension, declination
+
+
+def calculate_annulus_pointings(
+    sun_vector: np.ndarray,
+    *,
+    start_position_angle_deg: float = 0.0,
+    direction: str = "clockwise",
+) -> list[CameraPointing]:
+    """Calculate 15 tangent-aligned fields on the 45-degree solar annulus.
+
+    Position angle is measured from celestial north around the Sun. Because
+    the plotting convention puts increasing RA to the left, decreasing the
+    astronomical position angle moves clockwise on the displayed map.
+    """
+    sun = np.asarray(sun_vector, dtype=float).copy()
+    sun_norm = float(np.linalg.norm(sun))
+    if sun_norm == 0.0 or not np.isfinite(sun_norm):
+        raise ValueError("The reference Sun vector is invalid.")
+    sun /= sun_norm
+    sun_ra_deg, sun_dec_deg = vector_to_ra_dec(sun)
+    sun_ra = math.radians(sun_ra_deg)
+    sun_dec = math.radians(sun_dec_deg)
+    sun_east = np.asarray([-math.sin(sun_ra), math.cos(sun_ra), 0.0])
+    sun_north = np.asarray(
+        [
+            -math.sin(sun_dec) * math.cos(sun_ra),
+            -math.sin(sun_dec) * math.sin(sun_ra),
+            math.cos(sun_dec),
+        ]
+    )
+
+    if direction not in {"clockwise", "counterclockwise"}:
+        raise ValueError("direction must be 'clockwise' or 'counterclockwise'.")
+    direction_sign = -1.0 if direction == "clockwise" else 1.0
+    radius = math.radians(ANNULUS_CENTER_RADIUS_DEG)
+    spacing = 360.0 / ANNULUS_POINTING_COUNT
+    pointings: list[CameraPointing] = []
+
+    for index in range(ANNULUS_POINTING_COUNT):
+        position_angle_deg = (
+            start_position_angle_deg + direction_sign * index * spacing
+        ) % 360.0
+        position_angle = math.radians(position_angle_deg)
+        radial = (
+            math.cos(position_angle) * sun_north
+            + math.sin(position_angle) * sun_east
+        )
+        center = math.cos(radius) * sun + math.sin(radius) * radial
+        center /= np.linalg.norm(center)
+
+        increasing_angle_tangent = (
+            -math.sin(position_angle) * sun_north
+            + math.cos(position_angle) * sun_east
+        )
+        scan_tangent = direction_sign * increasing_angle_tangent
+        scan_tangent -= np.dot(scan_tangent, center) * center
+        scan_tangent /= np.linalg.norm(scan_tangent)
+
+        right_ascension_deg, declination_deg = vector_to_ra_dec(center)
+        center_ra = math.radians(right_ascension_deg)
+        center_dec = math.radians(declination_deg)
+        center_east = np.asarray(
+            [-math.sin(center_ra), math.cos(center_ra), 0.0]
+        )
+        center_north = np.asarray(
+            [
+                -math.sin(center_dec) * math.cos(center_ra),
+                -math.sin(center_dec) * math.sin(center_ra),
+                math.cos(center_dec),
+            ]
+        )
+        roll_deg = math.degrees(
+            math.atan2(
+                float(np.dot(scan_tangent, center_north)),
+                float(np.dot(scan_tangent, center_east)),
+            )
+        )
+        roll_deg = (roll_deg + 180.0) % 360.0 - 180.0
+        pointings.append(
+            CameraPointing(
+                number=index + 1,
+                position_angle_deg=position_angle_deg,
+                right_ascension_deg=right_ascension_deg,
+                declination_deg=declination_deg,
+                roll_deg=roll_deg,
+            )
+        )
+
+    return pointings
+
+
+def write_annulus_pointing_table(
+    path: Path,
+    pointings: list[CameraPointing],
+    start_datetime: datetime,
+    reference_sun_vector: np.ndarray,
+) -> Path:
+    """Write the 15 unique fields and both one-hour dwell times to CSV."""
+    resolved = path.expanduser().resolve()
+    resolved.parent.mkdir(parents=True, exist_ok=True)
+    sun_ra_deg, sun_dec_deg = vector_to_ra_dec(reference_sun_vector)
+    fieldnames = [
+        "field_number",
+        "sun_position_angle_deg",
+        "right_ascension_deg",
+        "declination_deg",
+        "roll_deg",
+        "nominal_solar_elongation_deg",
+        "first_dwell_start_utc",
+        "first_dwell_stop_utc",
+        "repeat_dwell_start_utc",
+        "repeat_dwell_stop_utc",
+        "reference_sun_ra_deg",
+        "reference_sun_dec_deg",
+    ]
+    with resolved.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        for index, pointing in enumerate(pointings):
+            first_start = start_datetime + timedelta(hours=index)
+            repeat_start = start_datetime + timedelta(
+                hours=index + ANNULUS_POINTING_COUNT
+            )
+            writer.writerow(
+                {
+                    "field_number": pointing.number,
+                    "sun_position_angle_deg": f"{pointing.position_angle_deg:.9f}",
+                    "right_ascension_deg": f"{pointing.right_ascension_deg:.9f}",
+                    "declination_deg": f"{pointing.declination_deg:.9f}",
+                    "roll_deg": f"{pointing.roll_deg:.9f}",
+                    "nominal_solar_elongation_deg": (
+                        f"{ANNULUS_CENTER_RADIUS_DEG:.9f}"
+                    ),
+                    "first_dwell_start_utc": first_start.isoformat(),
+                    "first_dwell_stop_utc": (
+                        first_start + timedelta(hours=1)
+                    ).isoformat(),
+                    "repeat_dwell_start_utc": repeat_start.isoformat(),
+                    "repeat_dwell_stop_utc": (
+                        repeat_start + timedelta(hours=1)
+                    ).isoformat(),
+                    "reference_sun_ra_deg": f"{sun_ra_deg:.9f}",
+                    "reference_sun_dec_deg": f"{sun_dec_deg:.9f}",
+                }
+            )
+    print(f"Wrote pointing table: {resolved}", flush=True)
+    return resolved
 
 
 def group_ephemeris_batches(
@@ -505,6 +736,8 @@ def render_frame(
     sequence_label: str,
     frame_number: int,
     frame_count: int,
+    sun_inner_guide_deg: float | None = None,
+    camera_sequence_note: str | None = None,
     width: int = 1280,
     height: int = 720,
 ) -> np.ndarray:
@@ -543,7 +776,7 @@ def render_frame(
     # seam. Keep the contour lines and describe their fixed levels below.
 
     sample_count = len(next(iter(body_vectors.values())))
-    marker_interval_hours = 1 if window_hours == 3 else 6
+    marker_interval_hours = 1 if window_hours <= 3 else 6
     for body_name in ("Earth", "Moon", "Sun"):
         coordinates = vectors_to_plot_track(body_vectors[body_name])
         plot_wrapped_line(
@@ -587,7 +820,7 @@ def render_frame(
     )
     sun_guide = spherical_cap_boundary(
         body_vectors["Sun"][midpoint_index],
-        60.0,
+        ANNULUS_OUTER_RADIUS_DEG,
     )
     plot_wrapped_line(
         axis,
@@ -595,9 +828,23 @@ def render_frame(
         color="#FFD400",
         linewidth=1.7,
         linestyle=":",
-        label="60° from Sun at midpoint",
+        label=f"{ANNULUS_OUTER_RADIUS_DEG:g}° from Sun at midpoint",
         zorder=7,
     )
+    if sun_inner_guide_deg is not None:
+        sun_inner_guide = spherical_cap_boundary(
+            body_vectors["Sun"][midpoint_index],
+            sun_inner_guide_deg,
+        )
+        plot_wrapped_line(
+            axis,
+            sun_inner_guide,
+            color="#FDE047",
+            linewidth=1.7,
+            linestyle="--",
+            label=f"{sun_inner_guide_deg:g}° from Sun at midpoint",
+            zorder=7,
+        )
 
     detector_outline = camera_boundary(
         camera_ra_deg,
@@ -697,7 +944,7 @@ def render_frame(
                     path_effects.Stroke(linewidth=3.2, foreground="#111827"),
                     path_effects.Normal(),
                 ],
-                label="60° Sun guide at midpoint",
+                label=f"{ANNULUS_OUTER_RADIUS_DEG:g}° Sun guide at midpoint",
             ),
             Line2D(
                 [],
@@ -708,6 +955,22 @@ def render_frame(
             ),
         ]
     )
+    if sun_inner_guide_deg is not None:
+        legend_handles.insert(
+            -1,
+            Line2D(
+                [],
+                [],
+                color="#FDE047",
+                linestyle="--",
+                linewidth=1.8,
+                path_effects=[
+                    path_effects.Stroke(linewidth=3.2, foreground="#111827"),
+                    path_effects.Normal(),
+                ],
+                label=f"{sun_inner_guide_deg:g}° Sun guide at midpoint",
+            ),
+        )
     axis.legend(
         handles=legend_handles,
         loc="lower center",
@@ -727,6 +990,15 @@ def render_frame(
         weight="bold",
         color="#111827",
     )
+    if sun_inner_guide_deg is None:
+        sun_guide_description = (
+            f"Dotted yellow = {ANNULUS_OUTER_RADIUS_DEG:g}° Sun guide; "
+        )
+    else:
+        sun_guide_description = (
+            f"Dashed/dotted yellow = {sun_inner_guide_deg:g}°–"
+            f"{ANNULUS_OUTER_RADIUS_DEG:g}° Sun annulus; "
+        )
     figure.text(
         0.5,
         0.925,
@@ -744,8 +1016,8 @@ def render_frame(
         f"Five-minute integration; white contours = 25%, 50%, and 75%; "
         f"Earth limb + {earth_clearance_deg:g}°; observer = {observer_name}; "
         "RA increases left.\n"
-        "Dotted yellow = 60° Sun guide; dashed white = Moon cap at the "
-        "frame midpoint.",
+        + sun_guide_description
+        + "dashed white = Moon cap at the frame midpoint.",
         ha="left",
         va="bottom",
         fontsize=7.0,
@@ -754,7 +1026,8 @@ def render_frame(
     figure.text(
         0.985,
         0.018,
-        f"Camera: RA {camera_ra_deg:.2f}°, Dec {camera_dec_deg:+.2f}°, "
+        (f"{camera_sequence_note}\n" if camera_sequence_note else "")
+        + f"Camera: RA {camera_ra_deg:.2f}°, Dec {camera_dec_deg:+.2f}°, "
         f"roll {camera_roll_deg:+.2f}°\n"
         f"Field mean {camera_stats['mean']:.2f} h "
         f"({100.0 * camera_stats['mean'] / window_hours:.1f}%)  ·  "
@@ -906,6 +1179,138 @@ def generate_video(
     return resolved
 
 
+def generate_annulus_scan_video(
+    *,
+    path: Path,
+    pointing_table_path: Path,
+    start_datetime: datetime,
+    longitude_grid: np.ndarray,
+    latitude_grid: np.ndarray,
+    grid_vectors: np.ndarray,
+    earth_clearance_deg: float,
+    moon_clearance_deg: float,
+    camera_size_deg: float,
+    step_minutes: int,
+    observer_spk: int,
+    ephemeris_source: str,
+    fps: int,
+    start_position_angle_deg: float,
+    direction: str,
+) -> tuple[Path, Path]:
+    """Render two identical passes through 15 one-hour annulus fields."""
+    total_frames = ANNULUS_POINTING_COUNT * ANNULUS_PASS_COUNT
+    total_hours = total_frames * ANNULUS_DWELL_HOURS
+    print(
+        "\nGenerating 30°–60° Sun-annulus scan: "
+        f"{total_frames} one-hour frames ({ANNULUS_PASS_COUNT} passes × "
+        f"{ANNULUS_POINTING_COUNT} fields)...",
+        flush=True,
+    )
+    ephemeris = fetch_ephemeris(
+        start_datetime,
+        window_hours=total_hours,
+        step_minutes=step_minutes,
+        observer_spk=observer_spk,
+        ephemeris_source=ephemeris_source,
+    )
+    reference_sun_vector = ephemeris.sun_vectors_km[0].copy()
+    pointings = calculate_annulus_pointings(
+        reference_sun_vector,
+        start_position_angle_deg=start_position_angle_deg,
+        direction=direction,
+    )
+    samples_per_window = ANNULUS_DWELL_HOURS * 60 // step_minutes
+
+    with Mp4Writer(path, width=1280, height=720, fps=fps) as writer:
+        for frame_index in range(total_frames):
+            field_index = frame_index % ANNULUS_POINTING_COUNT
+            pass_number = frame_index // ANNULUS_POINTING_COUNT + 1
+            pointing = pointings[field_index]
+            offset_samples = frame_index * samples_per_window
+            sample_stop = offset_samples + samples_per_window
+            track_stop = sample_stop + 1
+            frame_start = start_datetime + timedelta(
+                hours=frame_index * ANNULUS_DWELL_HOURS
+            )
+
+            coverage_hours = daily_coverage_map(
+                grid_vectors,
+                ephemeris.earth_vectors_km[offset_samples:sample_stop],
+                ephemeris.moon_vectors_km[offset_samples:sample_stop],
+                ephemeris.sun_vectors_km[offset_samples:sample_stop],
+                earth_clearance_deg,
+                moon_clearance_deg,
+                ANNULUS_INNER_RADIUS_DEG,
+                step_minutes,
+                latitude_grid.shape,
+            )
+            camera_mask = camera_footprint_mask(
+                grid_vectors,
+                pointing.right_ascension_deg,
+                pointing.declination_deg,
+                camera_size_deg,
+                pointing.roll_deg,
+            ).reshape(latitude_grid.shape)
+            statistics = camera_statistics(
+                coverage_hours,
+                camera_mask,
+                latitude_grid,
+                step_minutes,
+                ANNULUS_DWELL_HOURS,
+            )
+            body_vectors = {
+                "Earth": ephemeris.earth_vectors_km[offset_samples:track_stop],
+                "Moon": ephemeris.moon_vectors_km[offset_samples:track_stop],
+                "Sun": ephemeris.sun_vectors_km[offset_samples:track_stop],
+            }
+            repeat_note = (
+                f"Pass {pass_number}/{ANNULUS_PASS_COUNT} · "
+                f"field {pointing.number}/{ANNULUS_POINTING_COUNT}"
+            )
+            if pass_number == 2:
+                repeat_note += f" · exact repeat of frame {pointing.number}"
+            frame = render_frame(
+                coverage_hours=coverage_hours,
+                longitude_grid=longitude_grid,
+                latitude_grid=latitude_grid,
+                body_vectors=body_vectors,
+                observer_name=ephemeris.observer_name,
+                start_datetime=frame_start,
+                window_hours=ANNULUS_DWELL_HOURS,
+                sun_exclusion_deg=ANNULUS_INNER_RADIUS_DEG,
+                earth_clearance_deg=earth_clearance_deg,
+                moon_clearance_deg=moon_clearance_deg,
+                camera_ra_deg=pointing.right_ascension_deg,
+                camera_dec_deg=pointing.declination_deg,
+                camera_size_deg=camera_size_deg,
+                camera_roll_deg=pointing.roll_deg,
+                camera_stats=statistics,
+                step_minutes=step_minutes,
+                sequence_label="Sun-annulus survey · 1-hour dwell per field",
+                frame_number=frame_index + 1,
+                frame_count=total_frames,
+                sun_inner_guide_deg=ANNULUS_INNER_RADIUS_DEG,
+                camera_sequence_note=repeat_note,
+            )
+            writer.append(frame)
+            print(
+                f"Rendered annulus frame {frame_index + 1}/{total_frames}: "
+                f"pass {pass_number}, field {pointing.number}, "
+                f"{frame_start:%Y-%m-%d %H:%M} UTC",
+                flush=True,
+            )
+
+    resolved_video = path.expanduser().resolve()
+    print(f"Wrote MP4: {resolved_video}", flush=True)
+    resolved_table = write_annulus_pointing_table(
+        pointing_table_path,
+        pointings,
+        start_datetime,
+        reference_sun_vector,
+    )
+    return resolved_video, resolved_table
+
+
 def main() -> int:
     args = parse_arguments()
     try:
@@ -935,6 +1340,14 @@ def main() -> int:
         latest_planning_sample = max(
             long_starts[-1] + timedelta(hours=LONG_WINDOW_HOURS),
             short_starts[-1] + timedelta(hours=args.short_window_hours),
+            start_datetime
+            + timedelta(
+                hours=(
+                    ANNULUS_POINTING_COUNT
+                    * ANNULUS_PASS_COUNT
+                    * ANNULUS_DWELL_HOURS
+                )
+            ),
         )
         if (
             args.ephemeris_source == "tle"
@@ -968,6 +1381,10 @@ def main() -> int:
             f"Short video: {len(short_starts)} frame(s), one "
             f"{args.short_window_hours}-hour map every "
             f"{args.short_spacing_hours} hour(s)\n"
+            f"Annulus scan: {ANNULUS_POINTING_COUNT * ANNULUS_PASS_COUNT} "
+            f"frame(s), {ANNULUS_POINTING_COUNT} fields at "
+            f"{360.0 / ANNULUS_POINTING_COUNT:g}° position-angle spacing, "
+            f"two exact passes\n"
             f"Playback rate: {args.fps} fps",
             flush=True,
         )
@@ -992,6 +1409,23 @@ def main() -> int:
             observer_spk=args.observer_spk,
             ephemeris_source=args.ephemeris_source,
             fps=args.fps,
+        )
+        generate_annulus_scan_video(
+            path=args.output_annulus_scan,
+            pointing_table_path=args.output_annulus_pointings,
+            start_datetime=start_datetime,
+            longitude_grid=longitude_grid,
+            latitude_grid=latitude_grid,
+            grid_vectors=grid_vectors,
+            earth_clearance_deg=args.earth_clearance,
+            moon_clearance_deg=args.moon_clearance,
+            camera_size_deg=args.camera_size,
+            step_minutes=args.step_minutes,
+            observer_spk=args.observer_spk,
+            ephemeris_source=args.ephemeris_source,
+            fps=args.fps,
+            start_position_angle_deg=args.scan_start_position_angle,
+            direction=args.scan_direction,
         )
         generate_video(
             path=args.output_48_hour,
@@ -1018,7 +1452,11 @@ def main() -> int:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
 
-    print("\nBoth sky-coverage videos are complete.", flush=True)
+    print(
+        "\nAll three sky-coverage videos and the annulus pointing table "
+        "are complete.",
+        flush=True,
+    )
     return 0
 
 
