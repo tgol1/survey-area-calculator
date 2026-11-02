@@ -1,7 +1,7 @@
-## Visible-Sky Calculator v7
+## Visible-Sky Calculator v7.1
 George Tolis
 
-Last updated: 19 October 2026
+Last updated: 2 November 2026
 
 ## Changelog
 Every new version number represents completion of additional assignments for project.
@@ -78,6 +78,10 @@ v7 - 19 October 2026
 - Divided the annulus between 30° and 60° solar elongation into 15 sequential camera pointings.
 - Positioned each camera boresight on the 45° annulus midline with 24° Sun-centered position-angle spacing.
 - Updated the Streamlit interface to generate, display, and download the new annulus animation and pointing table alongside the existing videos.
+
+v7.1 - 2 November 2026
+- Added a new Observable sky centered around sun track tab next to the Sky projection guide.
+- Added downloadable PNG and CSV outputs containing the Sun-angle sweep and exposure results, with selectable 30° and 45° Sun-exclusion angles.
 
 ## Function
 Script computes the instantaneous visible fraction of sky from GOES-18 - a satellite positioned at 137W around Hawaii.
