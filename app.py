@@ -51,6 +51,11 @@ SUN_CENTERED_OBSERVABLE_SCRIPT = (
     / "sky_projection"
     / "goes18_sun_centered_observable_sky.py"
 )
+SUN_ANNULUS_STRATEGY_SCRIPT = (
+    PROJECT_ROOT
+    / "sky_projection"
+    / "goes18_sun_annulus_pointing_strategy.py"
+)
 SKY_PROJECTION_VIDEO_SCRIPT = (
     PROJECT_ROOT
     / "sky_projection"
@@ -373,7 +378,7 @@ def sun_centered_observable_metrics(
     csv_bytes: bytes | None,
     selected_sun_angle: int,
 ) -> dict[str, str]:
-    """Extract selected-angle exposure fractions from the generated CSV."""
+    """Extract camera-panel dwell counts from the generated summary CSV."""
     if not csv_bytes:
         return {}
     text = csv_bytes.decode("utf-8-sig")
@@ -382,21 +387,53 @@ def sun_centered_observable_metrics(
             float(row["sun_exclusion_deg"]),
             float(selected_sun_angle),
         ):
+            total = int(row["total_panel_count"])
+
+            def panel_metric(column: str) -> str:
+                count = int(row[f"panel_count_{column}"])
+                percentage = 100.0 * count / total if total else 0.0
+                return f"{count}/{total} · {percentage:.1f}%"
+
             return {
-                "10-minute exposure": (
-                    f"{float(row['observable_percent_10min']):.3f}% · "
-                    f"fraction {float(row['observable_fraction_10min']):.5f}"
-                ),
-                "1-hour exposure": (
-                    f"{float(row['observable_percent_1hr']):.3f}% · "
-                    f"fraction {float(row['observable_fraction_1hr']):.5f}"
-                ),
-                "24-hour exposure": (
-                    f"{float(row['observable_percent_24hr']):.3f}% · "
-                    f"fraction {float(row['observable_fraction_24hr']):.5f}"
+                "Unique 24° × 24° panels": f"{total}",
+                "Panels ≥10 minutes": panel_metric("10min"),
+                "Panels ≥1 hour": panel_metric("1hr"),
+                "Panels ≥24 hours": panel_metric("24hr"),
+                "Layout diagnostics": (
+                    f"{float(row['panel_overlap_percent']):.2f}% duplicate · "
+                    f"{float(row['target_coverage_percent']):.1f}% covered"
                 ),
             }
     return {}
+
+
+def sun_annulus_strategy_metrics(
+    summary_csv_bytes: bytes | None,
+) -> dict[str, str]:
+    """Extract optimized panel counts, coverage, and dwell allocations."""
+    if not summary_csv_bytes:
+        return {}
+    rows = {
+        int(float(row["sun_exclusion_deg"])): row
+        for row in csv.DictReader(
+            io.StringIO(summary_csv_bytes.decode("utf-8-sig"))
+        )
+    }
+    metrics: dict[str, str] = {}
+    for exclusion_deg in (30, 45):
+        row = rows.get(exclusion_deg)
+        if row is None:
+            continue
+        panel_count = int(row["panel_count"])
+        metrics[f"{exclusion_deg}° annulus plan"] = (
+            f"{panel_count} panels · "
+            f"{float(row['target_coverage_percent']):.2f}% covered"
+        )
+        metrics[f"{exclusion_deg}° maximum dwell"] = (
+            f"{float(row['maximum_one_pass_dwell_minutes']):.1f} min once · "
+            f"{float(row['maximum_two_pass_dwell_minutes']):.1f} min twice"
+        )
+    return metrics
 
 
 def save_result(
@@ -840,7 +877,7 @@ def run_sun_centered_observable_sky(
     start_time: time,
     sun_angle: int,
 ) -> None:
-    """Calculate continuous access within the hemisphere centered on the Sun."""
+    """Plan and evaluate low-overlap panels in the Sun-centered hemisphere."""
     if not required_files_exist(
         [
             SUN_CENTERED_OBSERVABLE_SCRIPT,
@@ -855,6 +892,15 @@ def run_sun_centered_observable_sky(
         output_prefix = Path(directory) / "goes18_sun_centered_observable_sky"
         output_png = output_prefix.with_suffix(".png")
         output_csv = output_prefix.with_suffix(".csv")
+        output_panels_csv = output_prefix.parent / (
+            output_prefix.name + "_panels.csv"
+        )
+        output_exposure_png = output_prefix.parent / (
+            output_prefix.name + "_exposure_curves.png"
+        )
+        output_exposure_csv = output_prefix.parent / (
+            output_prefix.name + "_exposure_curves.csv"
+        )
         command = [
             sys.executable,
             str(SUN_CENTERED_OBSERVABLE_SCRIPT),
@@ -870,12 +916,19 @@ def run_sun_centered_observable_sky(
             str(output_prefix),
         ]
         with st.spinner(
-            "Propagating GOES-18 and calculating continuous 10-minute, "
-            "1-hour, and 24-hour access in the Sun-centered hemisphere..."
+            "Propagating GOES-18, testing every complete 24° × 24° panel "
+            "at five-minute cadence, maximizing continuous dwell, and "
+            "calculating the three observable-sky curves..."
         ):
-            return_code, log = run_command(command, timeout_seconds=1_800)
+            return_code, log = run_command(
+                command,
+                timeout_seconds=1_800,
+                environment=tle_runtime_environment(),
+            )
 
         csv_bytes = read_file_bytes(output_csv)
+        panels_csv_bytes = read_file_bytes(output_panels_csv)
+        exposure_csv_bytes = read_file_bytes(output_exposure_csv)
         save_result(
             "sun_centered_observable_result",
             return_code,
@@ -884,9 +937,19 @@ def run_sun_centered_observable_sky(
                 "sun_centered_exposure_plot": (
                     read_file_bytes(output_png),
                     (
-                        "Observable fraction of the 2π-steradian hemisphere "
-                        "centered on the Sun for continuous 10-minute, "
-                        "1-hour, and 24-hour exposures."
+                        "Low-overlap 24° × 24° camera layout in the Sun-centered "
+                        "target region. Panel color is its exclusive longest "
+                        "continuous unobscured dwell category; the bars are "
+                        "cumulative qualification counts."
+                    ),
+                ),
+                "sun_centered_exposure_curves": (
+                    read_file_bytes(output_exposure_png),
+                    (
+                        "Continuously observable fraction of the Sun-centered "
+                        "hemisphere versus Sun exclusion angle for 10-minute, "
+                        "1-hour, and 24-hour exposures. The orange marker "
+                        "shows the selected 30° or 45° exclusion."
                     ),
                 ),
             },
@@ -898,11 +961,116 @@ def run_sun_centered_observable_sky(
                 ),
                 "csv": (
                     csv_bytes,
-                    "goes18_sun_centered_observable_sky.csv",
+                    "goes18_sun_centered_panel_summary.csv",
+                    "text/csv",
+                ),
+                "panels_csv": (
+                    panels_csv_bytes,
+                    "goes18_sun_centered_panel_schedule.csv",
+                    "text/csv",
+                ),
+                "exposure_png": (
+                    read_file_bytes(output_exposure_png),
+                    "goes18_sun_centered_exposure_curves.png",
+                    "image/png",
+                ),
+                "exposure_csv": (
+                    exposure_csv_bytes,
+                    "goes18_sun_centered_exposure_curves.csv",
                     "text/csv",
                 ),
             },
             metrics=sun_centered_observable_metrics(csv_bytes, sun_angle),
+        )
+
+
+def run_sun_annulus_pointing_strategy(
+    start_date: date,
+    start_time: time,
+    slew_minutes: float,
+    available_hours: float,
+) -> None:
+    """Generate optimized low-overlap annulus layouts and dwell schedules."""
+    if not required_files_exist(
+        [
+            SUN_ANNULUS_STRATEGY_SCRIPT,
+            DAILY_CAMERA_PROJECTION_SCRIPT,
+            TLE_SCRIPT,
+            HORIZONS_SCRIPT,
+        ]
+    ):
+        return
+
+    with tempfile.TemporaryDirectory(prefix="goes18-annulus-plan-") as directory:
+        output_prefix = Path(directory) / "goes18_sun_annulus_pointing_strategy"
+        output_png = output_prefix.with_suffix(".png")
+        summary_csv = output_prefix.parent / (
+            output_prefix.name + "_summary.csv"
+        )
+        pointings_csv = output_prefix.parent / (
+            output_prefix.name + "_pointings.csv"
+        )
+        command = [
+            sys.executable,
+            str(SUN_ANNULUS_STRATEGY_SCRIPT),
+            "--date",
+            start_date.isoformat(),
+            "--start-time",
+            start_time.strftime("%H:%M"),
+            "--slew-minutes",
+            str(slew_minutes),
+            "--available-hours",
+            str(available_hours),
+            "--ephemeris-source",
+            "tle",
+            "--output-prefix",
+            str(output_prefix),
+        ]
+        with st.spinner(
+            "Optimizing the 30°–90° and 45°–90° low-overlap camera layouts, "
+            "verifying equal-area coverage, and maximizing one- and "
+            "two-pass dwell times..."
+        ):
+            return_code, log = run_command(
+                command,
+                timeout_seconds=1_800,
+                environment=tle_runtime_environment(),
+            )
+
+        summary_bytes = read_file_bytes(summary_csv)
+        plot_bytes = read_file_bytes(output_png)
+        save_result(
+            "sun_annulus_strategy_result",
+            return_code,
+            log,
+            images={
+                "annulus_strategy": (
+                    plot_bytes,
+                    (
+                        "Low-overlap 24° × 24° camera layouts for the 30°–90° "
+                        "and 45°–90° observable annuli, including verified "
+                        "coverage and maximum equal dwell allocations."
+                    ),
+                ),
+            },
+            downloads={
+                "png": (
+                    plot_bytes,
+                    "goes18_sun_annulus_pointing_strategy.png",
+                    "image/png",
+                ),
+                "summary": (
+                    summary_bytes,
+                    "goes18_sun_annulus_pointing_strategy_summary.csv",
+                    "text/csv",
+                ),
+                "pointings": (
+                    read_file_bytes(pointings_csv),
+                    "goes18_sun_annulus_pointing_strategy_pointings.csv",
+                    "text/csv",
+                ),
+            },
+            metrics=sun_annulus_strategy_metrics(summary_bytes),
         )
 
 
@@ -1054,6 +1222,7 @@ reference_tabs = st.tabs(
         "README.md",
         "Sky projection guide",
         "Observable sky centered around sun track",
+        "Sun-annulus pointing strategy",
         "Sky projection videos",
     ]
 )
@@ -1302,17 +1471,20 @@ with reference_tabs[1]:
 with reference_tabs[2]:
     st.markdown("### Observable sky centered around the Sun track")
     st.markdown(
-        "This calculation restricts the survey area to the celestial "
-        "hemisphere centered on the Sun—the 2π steradians within 90° of the "
-        "Sun at each exposure midpoint. It reports what fraction of that "
-        "hemisphere remains continuously observable for 10-minute, 1-hour, "
-        "and 24-hour exposures while applying the Earth, Moon, and Sun "
-        "avoidance regions."
+        "This planner fills the Sun-centered target region—from the selected "
+        "30° or 45° Sun exclusion boundary to 90° solar elongation—with "
+        "unique 24° × 24° camera images. It tests each complete image against "
+        "the moving Earth, Moon, and Sun exclusions every five minutes, then "
+        "finds the longest continuous interval for which that exact field can "
+        "remain fixed in inertial right ascension and declination."
     )
     st.info(
-        "The plot sweeps the Sun exclusion radius from 0° through 90°. The "
-        "30° or 45° selection places a marker on each curve and determines "
-        "the three fraction and percentage values displayed above the plot."
+        "The fixed low-overlap layout contains 38 candidate panels for a 30° "
+        "Sun exclusion or 28 panels for a 45° exclusion. The script measures "
+        "the residual overlap and the target-region coverage instead of "
+        "assuming that square camera fields can tile a curved spherical "
+        "annulus perfectly. A second PNG restores the three continuous "
+        "10-minute, 1-hour, and 24-hour observable-sky curves."
     )
 
     with st.form("sun_centered_observable_form"):
@@ -1332,7 +1504,7 @@ with reference_tabs[2]:
             key="sun_centered_observable_time",
         )
         sun_track_angle = st.radio(
-            "Sun exclusion angle to highlight",
+            "Sun exclusion angle and panel layout",
             options=(30, 45),
             index=0,
             horizontal=True,
@@ -1340,7 +1512,7 @@ with reference_tabs[2]:
             key="sun_centered_observable_angle",
         )
         sun_track_submit = st.form_submit_button(
-            "Calculate Sun-centered observable sky",
+            "Calculate panel plan and exposure curves",
             type="primary",
         )
 
@@ -1357,27 +1529,161 @@ with reference_tabs[2]:
 
     st.markdown(
         """
-        #### How the fraction is defined
+        #### How the panel count and dwell categories are defined
 
-        - A direction belongs to the **Sun-centered hemisphere** when it is
-          within 90° of the Sun at the midpoint of that candidate exposure.
-        - A direction is counted as **observable** only when it remains outside
-          the Earth-limb, Moon, and selected Sun exclusion regions at every
-          five-minute sample throughout the complete exposure.
-        - The 10-minute and 1-hour results are averaged over every possible
-          five-minute-aligned start during the selected 24-hour interval. The
-          24-hour result uses the single complete interval.
-        - The reported percentage uses only the solar hemisphere as its
-          denominator. Therefore, 100% here represents one-half of the full
-          celestial sphere, and 50% represents one-quarter of the full sky.
-        - These are **continuous-exposure fractions**, not accumulated visible
-          time. A field that becomes obstructed for even one sample does not
-          qualify for that exposure window.
+        - One panel is one **24° × 24° image** that the satellite camera would
+          take. It has one inertial right ascension, declination, and roll.
+        - The 30° layout uses **38 unique panels** on three staggered rings; the
+          45° layout uses **28 unique panels** on two staggered rings. Adjacent
+          fields are spaced to minimize overlap, not intentionally stacked.
+        - A panel is safe at a five-minute sample only when its **full 13 × 13
+          footprint grid**—not merely its center—is outside the Earth-limb,
+          Moon, and selected Sun exclusion regions.
+        - The program finds each panel's **longest uninterrupted safe run** in
+          the selected 24 hours. The panel is assigned once to its exclusive
+          longest-dwell category: 24 hours, at least 1 hour, at least 10
+          minutes, or unavailable.
+        - The three headline panel counts are cumulative requirements. A field
+          safe for 24 hours therefore also qualifies for 1 hour and 10 minutes.
+          The map colors remain exclusive, so a panel is never double-counted
+          visually.
+        - Because flat-sided images cannot exactly tile a curved annulus on a
+          sphere, a small residual overlap and uncovered gaps are unavoidable.
+          Every complete field remains between the exclusion boundary and 90°.
+          The generated summary reports both multiply covered area and the
+          fraction of the target annulus covered.
+        - Download the panel schedule CSV for every field's RA, declination,
+          roll, longest dwell, and best observing start and stop times.
+
+        #### How to read the three line graphs
+
+        - The second PNG retains the earlier equal-area sky calculation. Its
+          horizontal axis sweeps the Sun-center exclusion radius from 0° to
+          90°, and its vertical axis is the continuously observable percentage
+          of the Sun-centered hemisphere.
+        - The three panels apply continuous exposure requirements of **10
+          minutes, 1 hour, and 24 hours**. The orange dashed line and marker
+          identify the selected 30° or 45° exclusion angle.
+        - These curves evaluate 8,192 equal-area sky directions, so they answer
+          an **area-fraction** question. The first PNG answers the separate
+          **camera-panel scheduling** question. The two figures use the same
+          ephemeris and avoidance geometry but should not be interpreted as
+          identical measurements.
         """
     )
 
 
 with reference_tabs[3]:
+    st.markdown("### Sun-annulus camera pointing strategy")
+    st.markdown(
+        "One panel is now defined as one unique 24° × 24° camera image. The "
+        "planner uses staggered solar-elongation rings to cover at least "
+        "98.5% of each target annulus with the minimum tested panel count, "
+        "while avoiding the deliberate overlap used by the old gap-free "
+        "layout. It calculates inertial RA, declination, and roll for every "
+        "panel and automatically maximizes the equal dwell time."
+    )
+    st.markdown(
+        """
+        | Observable target region | Solid angle | Radial rings | Panels per ring | Total panels |
+        |---|---:|---:|---|---:|
+        | 30°–90° annulus | 5.441 sr | 3 | 10 + 13 + 15 | **38** |
+        | 45°–90° annulus | 4.443 sr | 2 | 13 + 15 | **28** |
+        """
+    )
+    st.info(
+        "Although the 45° exclusion disk is larger, the observable region is "
+        "outside that disk and inside the 90° circle. Therefore, the 45°–90° "
+        "annulus is smaller—not larger—than the 30°–90° annulus and needs "
+        "fewer panels. Coverage and overlap are independently verified on a "
+        "32,768-point equal-area sky grid."
+    )
+
+    with st.form("sun_annulus_strategy_form"):
+        strategy_time_columns = st.columns(2)
+        strategy_date = strategy_time_columns[0].date_input(
+            "UTC strategy start date",
+            value=DEFAULT_TLE_START_DATE,
+            max_value=TLE_CAMERA_MAX_START_DATE,
+            format="YYYY-MM-DD",
+            key="sun_annulus_strategy_date",
+        )
+        strategy_time = strategy_time_columns[1].time_input(
+            "UTC strategy start time",
+            value=time(0, 0),
+            step=timedelta(minutes=5),
+            key="sun_annulus_strategy_time",
+        )
+        strategy_columns = st.columns(2)
+        strategy_slew = strategy_columns[0].number_input(
+            "Slew allowance per field (minutes)",
+            min_value=0.0,
+            max_value=120.0,
+            value=0.0,
+            step=1.0,
+            key="sun_annulus_strategy_slew",
+        )
+        strategy_available = strategy_columns[1].number_input(
+            "Available observing window (hours)",
+            min_value=1.0,
+            max_value=8760.0,
+            value=24.0,
+            step=1.0,
+            key="sun_annulus_strategy_available",
+            help=(
+                "The planner divides this time across all unique panels and "
+                "reports the maximum equal dwell for one or two full passes."
+            ),
+        )
+        strategy_submit = st.form_submit_button(
+            "Generate annulus pointing strategy",
+            type="primary",
+        )
+
+    if strategy_submit:
+        if isinstance(strategy_date, date) and isinstance(strategy_time, time):
+            run_sun_annulus_pointing_strategy(
+                strategy_date,
+                strategy_time,
+                float(strategy_slew),
+                float(strategy_available),
+            )
+        else:
+            st.error("Select a valid UTC start date and time.")
+    render_result("sun_annulus_strategy_result")
+
+    st.markdown(
+        """
+        #### How the optimization is defined
+
+        - A **panel** is one fixed 24° × 24° inertial field of view. The first
+          pass visits every unique panel exactly once; no panel is counted
+          twice merely because neighboring images overlap.
+        - The chosen layouts are the lowest-count tested staggered-ring plans
+          meeting the **98.5% equal-area coverage goal** while keeping complete
+          camera footprints between the exclusion boundary and 90°.
+        - The previous 45-panel and 30-panel plans forced essentially gap-free
+          coverage and therefore contained more overlap. The revised **38-panel
+          and 28-panel plans** leave small gaps in exchange for longer exposures
+          and less repeated sky area.
+        - For one pass, the available time—after all requested slews—is divided
+          equally among the panels. This is the longest common exposure that
+          still covers the full layout once.
+        - The second pass reuses the exact same RA, declination, and roll for
+          each field. The app separately reports the longest common dwell that
+          permits **two complete passes** within the same time budget.
+        - With the default 24-hour window and no slew allowance, the 30° plan
+          receives about **37.9 minutes per panel once** or **18.9 minutes per
+          panel twice**. The smaller 45° plan receives about **51.4 minutes
+          once** or **25.7 minutes twice**.
+        - The map is a geometric camera-tiling plan. Earth and Moon avoidance,
+          detector overhead, and operational slew constraints should be
+          applied before treating it as a final spacecraft schedule.
+        """
+    )
+
+
+with reference_tabs[4]:
     st.markdown("### Animated NEO sky-survey coverage")
     st.markdown(
         "Generate three browser-playable MP4s from the same starting time. "

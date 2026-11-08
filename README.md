@@ -1,7 +1,7 @@
-## Visible-Sky Calculator v7.1
+## Visible-Sky Calculator v8
 George Tolis
 
-Last updated: 2 November 2026
+Last updated: 7 November 2026
 
 ## Changelog
 Every new version number represents completion of additional assignments for project.
@@ -82,6 +82,11 @@ v7 - 19 October 2026
 v7.1 - 2 November 2026
 - Added a new Observable sky centered around sun track tab next to the Sky projection guide.
 - Added downloadable PNG and CSV outputs containing the Sun-angle sweep and exposure results, with selectable 30° and 45° Sun-exclusion angles.
+
+v8 - 7 November 2026
+- Added a Sun-annulus pointing strategy for planning observations between the selected Sun-exclusion boundary and 90° from the Sun.
+- Defined each observing panel as one fixed 24° × 24° camera footprint with its own right ascension, declination, and roll angle.
+- Added CSV exports containing every panel’s pointing coordinates, roll angle, exposure start time, exposure end time, and pass number.
 
 ## Function
 Script computes the instantaneous visible fraction of sky from GOES-18 - a satellite positioned at 137W around Hawaii.
